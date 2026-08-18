@@ -1,0 +1,38 @@
+[project]
+name = "ai-agent"
+version = "0.1.0"
+description = "AI 陪伴 Agent — Python 全栈对话应用"
+readme = "README.md"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+ignore = [
+    "B008",
+    # 项目规范要求使用 typing 精确类型（如 Dict[str, int]），
+    # 与 ruff 的 UP 现代化建议（改用 dict/list/X|None）冲突，故关闭。
+    "UP006",
+    "UP007",
+    "UP035",
+    "UP045",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+exclude = ["tests"]
+
+# 第三方库（openai / mcp）类型存根不完善，属于库边界，跳过其类型检查
+[[tool.mypy.overrides]]
+module = ["openai", "openai.*", "mcp", "mcp.*"]
+ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

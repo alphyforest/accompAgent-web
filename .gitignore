@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 数据库（运行时数据）
+*.db
+*.sqlite
+*.sqlite3
+
+# 备份文件
+*.bak.*
+*.kimi-before
+
+# 环境变量 / 密钥
+.env
+*.key
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 日志
+*.log

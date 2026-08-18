@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI 陪伴 Agent</title>
+  <!-- Vue 3 CDN（v3.4.21，用于响应式 UI） -->
+  <script src="https://unpkg.com/vue@3.4.21/dist/vue.global.prod.js"></script>
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <div id="app">
+    <div class="stage">
+      <!-- 全屏背景 -->
+      <div class="background" :style="{ backgroundImage: 'url(' + currentBackground + ')' }"></div>
+
+      <!-- 左上角 Logo，点击打开控制台 -->
+      <button class="logo" @click="openConsole" title="控制台">
+        <span class="logo-icon">♫</span>
+      </button>
+
+      <!-- 角色立绘（屏幕中央） -->
+      <div class="character">
+        <img :src="currentPortrait" alt="角色立绘" class="portrait" />
+      </div>
+
+      <!-- 对话气泡（仅 agent 回复，锚定立绘右上角） -->
+      <div class="chat-panel" v-show="chatVisible">
+        <div
+          v-for="msg in agentBubbles"
+          :key="msg.id"
+          class="bubble"
+        >
+          {{ msg.display }}
+          <span v-if="msg.typing" class="cursor">▌</span>
+        </div>
+      </div>
+
+      <!-- 气氛值进度条 -->
+      <div class="mood-bar">
+        <span class="mood-label">气氛值 {{ moodLabel }} ({{ mood }})</span>
+        <div class="mood-track">
+          <div class="mood-fill" :style="{ width: moodWidth + '%' }"></div>
+        </div>
+      </div>
+
+      <!-- 底部输入 -->
+      <div class="input-bar">
+        <input
+          v-model="userInput"
+          @keyup.enter="send"
+          placeholder="说点什么吧~"
+          :disabled="streaming"
+        />
+        <button @click="send" :disabled="streaming">发送</button>
+      </div>
+
+      <!-- 控制台抽屉（右拉菜单，左侧菜单栏 + 右侧内容页） -->
+      <transition name="drawer">
+        <div v-if="consoleOpen" class="console-overlay" @click.self="closeConsole">
+          <aside class="console">
+            <!-- 左侧菜单栏 -->
+            <nav class="console-nav">
+              <button
+                v-for="tab in consoleTabs"
+                :key="tab.id"
+                class="nav-item"
+                :class="{ active: activeConsoleTab === tab.id }"
+                @click="activeConsoleTab = tab.id"
+                :title="tab.label"
+              >
+                <span class="nav-icon">{{ tab.icon }}</span>
+                <span class="nav-label">{{ tab.label }}</span>
+              </button>
+            </nav>
+
+            <!-- 右侧内容区 -->
+            <div class="console-main">
+              <div class="console-header">
+                <h2>{{ currentConsoleTab.label }}</h2>
+                <button class="console-close" @click="closeConsole">✕</button>
+              </div>
+
+              <div class="console-body">
+                <!-- ===== 立绘页 ===== -->
+                <div v-if="activeConsoleTab === 'portrait'" class="tab-page">
+                  <section class="console-section">
+                    <h3>角色立绘</h3>
+                    <div class="portrait-previews">
+                      <div
+                        v-for="p in portraitList"
+                        :key="p.name"
+                        class="portrait-item"
+                        :class="{ active: p.name === previewPortrait }"
+                        @click="previewPortrait = p.name"
+                      >
+                        <img :src="p.src" :alt="p.label" />
+                        <span>{{ p.label }}</span>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+
+                <!-- ===== 背景页 ===== -->
+                <div v-if="activeConsoleTab === 'background'" class="tab-page">
+                  <section class="console-section">
+                    <h3>背景切换</h3>
+                    <div class="bg-list">
+                      <div
+                        v-for="(b, i) in backgrounds"
+                        :key="i"
+                        class="bg-item"
+                        :class="{ active: i === backgroundIndex }"
+                        @click="selectBackground(i)"
+                      >
+                        <img :src="b.src" alt="背景" />
+                        <span>{{ b.name }}</span>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+
+                <!-- ===== 音乐页 ===== -->
+                <div v-if="activeConsoleTab === 'music'" class="tab-page">
+                  <section class="console-section">
+                    <h3>音乐播放</h3>
+                    <div class="bgm-list">
+                      <div
+                        v-for="(b, i) in bgmList"
+                        :key="i"
+                        class="bgm-item"
+                        :class="{ active: i === bgmIndex && bgmPlaying }"
+                        @click="selectBgm(i)"
+                      >
+                        <span class="bgm-name">{{ b.name }}</span>
+                        <span class="bgm-status">{{ i === bgmIndex && bgmPlaying ? '播放中' : '' }}</span>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+
+                <!-- ===== 聊天记录页 ===== -->
+                <div v-if="activeConsoleTab === 'records'" class="tab-page">
+                  <section class="console-section">
+                    <div class="records-toolbar">
+                      <h3>聊天记录（{{ messages.length }}）</h3>
+                      <button class="console-btn small" @click="clearChat">清空</button>
+                    </div>
+                    <div v-if="messages.length === 0" class="records-empty">
+                      暂无聊天记录
+                    </div>
+                    <div v-else class="records-list">
+                      <div v-for="msg in messages" :key="msg.id" class="record-item">
+                        <div class="record-header">
+                          <span class="record-role" :class="msg.role">{{ msg.role === 'user' ? '我' : '爱莉希雅' }}</span>
+                          <button class="record-del" @click="deleteMessage(msg.id)" title="删除">✕</button>
+                        </div>
+                        <div class="record-content">{{ msg.content }}</div>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+
+                <!-- ===== 设置页 ===== -->
+                <div v-if="activeConsoleTab === 'settings'" class="tab-page">
+                  <section class="console-section">
+                    <h3>对话管理</h3>
+                    <button class="console-btn" @click="clearChat">清除聊天记录</button>
+                    <button class="console-btn" @click="resetAll">重置对话状态</button>
+                  </section>
+                </div>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </transition>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

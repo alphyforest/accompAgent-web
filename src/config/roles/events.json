@@ -1,0 +1,54 @@
+[
+  {
+    "id": "coquettish_s1",
+    "name": "邀约",
+    "type": "event",
+    "minMood": 50,
+    "maxMood": 100,
+    "probability": 0.25,
+    "cooldownMinutes": 3,
+    "prompt": "请从自己的兴趣爱好中提取一个相关的活动，用俏皮的语气向用户发起邀约，并征求用户的意见。注意不要直接输出情绪标签，你的情绪由系统控制。",
+    "emotion": "happy",
+    "chain": ["coquettish_s2_accept", "coquettish_s3_reject"]
+  },
+  {
+    "id": "coquettish_s2_accept",
+    "name": "邀约-惊喜",
+    "type": "chain",
+    "prompt": "用户答应了你的邀约，请表现出惊喜和开心，表达你的期待。",
+    "emotion": "surprised"
+  },
+  {
+    "id": "coquettish_s3_reject",
+    "name": "邀约-恳求",
+    "type": "chain",
+    "prompt": "用户拒绝了你的邀约，请表现出难过，再次用撒娇的语气恳求用户同意。",
+    "emotion": "sad",
+    "chain": ["coquettish_s4_accept", "coquettish_s5_giveup"]
+  },
+  {
+    "id": "coquettish_s4_accept",
+    "name": "邀约-欢喜",
+    "type": "chain",
+    "prompt": "用户最终答应了，请表现出欢喜和感动。",
+    "emotion": "happy"
+  },
+  {
+    "id": "coquettish_s5_giveup",
+    "name": "邀约-遗憾",
+    "type": "chain",
+    "prompt": "用户再次拒绝了，请表现出遗憾和一点点委屈，但不要过度纠缠。",
+    "emotion": "sad"
+  },
+  {
+    "id": "excited",
+    "name": "兴奋分享",
+    "type": "event",
+    "minMood": 30,
+    "maxMood": 100,
+    "probability": 0.2,
+    "cooldownMinutes": 5,
+    "prompt": "你心情特别好，想和用户分享一件有趣的事。",
+    "emotion": "sharing"
+  }
+]
