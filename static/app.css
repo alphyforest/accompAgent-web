@@ -523,6 +523,33 @@ body {
 .drawer-enter-from .console,
 .drawer-leave-to .console { transform: translateX(100%); }
 
+/* ===== 记忆模块：短期/长期子页切换 ===== */
+.memory-subtabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.memory-subtab {
+  flex: 1;
+  padding: 10px 0;
+  border: none;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+
+.memory-subtab:hover { background: rgba(255, 255, 255, 0.14); color: #fff; }
+
+.memory-subtab.active {
+  background: rgba(242, 123, 167, 0.2);
+  color: var(--c-primary);
+  font-weight: 600;
+}
+
 /* ===== 聊天记录页 ===== */
 .records-toolbar {
   display: flex;
@@ -615,3 +642,53 @@ body {
   .input-bar { width: calc(100% - 32px); }
   .mood-bar { width: 240px; bottom: 86px; }
 }
+
+/* ===== AI 记忆页签（第二阶段） ===== */
+.memory-list { display: flex; flex-direction: column; gap: 14px; }
+
+.memory-cat-title {
+  font-size: var(--fs-caption);
+  color: var(--c-ink-soft);
+  letter-spacing: 1px;
+  margin-bottom: 6px;
+}
+
+.memory-item {
+  background: var(--c-surface);
+  border: 1px solid var(--c-stroke);
+  border-radius: var(--r-md);
+  padding: 10px 12px;
+  transition: border-color var(--dur-fast);
+}
+
+.memory-item:hover { border-color: var(--c-primary); }
+
+.memory-item-head { display: flex; align-items: center; gap: 8px; }
+
+.memory-key { font-weight: 600; }
+
+.memory-badge {
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: var(--r-pill);
+  background: rgba(242, 123, 167, 0.18);
+  color: var(--c-primary-deep);
+}
+
+.memory-badge.guess { background: rgba(157, 123, 234, 0.18); color: var(--c-accent); }
+
+.memory-imp { margin-left: auto; font-size: 11px; color: var(--c-ink-soft); }
+
+.memory-value {
+  margin-top: 6px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--c-ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.memory-actions { margin-top: 8px; display: flex; gap: 8px; }
+
+.summary-time { margin-left: auto; font-size: 11px; color: var(--c-ink-soft); }

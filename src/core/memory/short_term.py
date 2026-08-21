@@ -26,3 +26,7 @@ class ShortTermMemory:
     def clear(self, session_id: str) -> None:
         """清空指定会话的历史。"""
         self._sessions.pop(session_id, None)
+
+    def clear_all(self) -> None:
+        """清空全部会话的历史（三档清除的 history/all 档使用）。"""
+        self._sessions.clear()

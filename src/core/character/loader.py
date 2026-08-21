@@ -5,9 +5,9 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 
-def load_system_prompt(config_dir: str) -> str:
-    """从配置目录加载角色人设文本。"""
-    path = Path(config_dir) / "system_prompt.txt"
+def load_system_prompt(config_dir: str, filename: str = "system_prompt.txt") -> str:
+    """从配置目录加载角色人设文本（文件名默认 system_prompt.txt，可由角色卡指定）。"""
+    path = Path(config_dir) / filename
     return path.read_text(encoding="utf-8").strip()
 
 

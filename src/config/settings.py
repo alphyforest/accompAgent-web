@@ -1,5 +1,7 @@
 """应用配置，通过环境变量加载，支持 .env 文件。"""
 
+from typing import List
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -37,6 +39,44 @@ class Settings(BaseSettings):
 
     # 事件
     global_cooldown: int = 3
+
+    # 第二阶段：语义化长期记忆
+    memory_db_path: str = "./data/memory.db"  # 长期记忆 SQLite 文件路径
+    memory_idle_timeout_minutes: int = 15  # 惰性总结：空闲超时（分钟）后视为上一会话结束
+    memory_segment_max_messages: int = 30  # 惰性总结：条数阈值兜底分段
+    memory_inject_top_k: int = 8  # 记忆注入 top-k 上限
+    memory_forget_days: int = 30  # 遗忘：超 N 天未引用降权
+    memory_forget_decay: int = 2  # 遗忘：每次降权分数
+    # 即时抽取（方案 B：function calling 实时写入）：
+    # 用户消息命中关键字时，后台异步调 LLM 函数调用抽取画像/事实即时入库，不阻塞回复。
+    memory_instant_enabled: bool = True  # 总开关
+    memory_instant_keywords: List[str] = [  # 命中任一即触发抽取的用户信息信号
+        "我叫",
+        "我是",
+        "我的",
+        "我喜欢",
+        "我不喜欢",
+        "我讨厌",
+        "我住在",
+        "我在",
+        "我正在",
+        "我最近",
+        "我养",
+        "我有",
+        "我准备",
+        "我在准备",
+        "我打算",
+        "我计划",
+        "我有点",
+        "我想",
+        "我想要",
+        "我工作",
+        "我学",
+        "我家",
+        "可以叫我",
+        "请别",
+        "不要这样",
+    ]
 
 
 # 全局配置单例；api_key 等必填项在运行时从 .env / 环境变量注入，

@@ -1,7 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "ai-agent"
 version = "0.1.0"
 description = "AI 陪伴 Agent — Python 全栈对话应用"
+# readme 按 PEP 621 以 pyproject.toml 所在目录解析，README.md 位于同目录。
+# 若 IDE / 打包工具提示找不到，请以 ai_agent 目录作为项目根打开。
 readme = "README.md"
 requires-python = ">=3.11"
 
@@ -23,7 +29,9 @@ ignore = [
 ]
 
 [tool.mypy]
-python_version = "3.11"
+# 目标类型版本与实际运行时一致（开发/运行环境为 Python 3.12）；
+# 项目 requires-python 仍为 >=3.11，业务代码保持 3.11 兼容写法。
+python_version = "3.12"
 strict = true
 ignore_missing_imports = true
 exclude = ["tests"]
@@ -31,6 +39,12 @@ exclude = ["tests"]
 # 第三方库（openai / mcp）类型存根不完善，属于库边界，跳过其类型检查
 [[tool.mypy.overrides]]
 module = ["openai", "openai.*", "mcp", "mcp.*"]
+ignore_errors = true
+
+# numpy 由 openai 的 numpy_proxy 可选代理引入，非项目直接依赖，
+# 将其从依赖图中解析出的存根视为库边界，跳过类型检查。
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
 ignore_errors = true
 
 [tool.pytest.ini_options]

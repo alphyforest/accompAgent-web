@@ -15,14 +15,14 @@
 import json
 import random
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from pydantic import BaseModel, Field
 
-@dataclass
-class EventNode:
-    """事件节点。"""
+
+class EventNode(BaseModel):
+    """事件节点（领域模型，Pydantic，rules.md §15.1）。"""
 
     id: str
     name: str
@@ -33,7 +33,7 @@ class EventNode:
     max_mood: int = 100
     probability: float = 1.0
     cooldown_minutes: int = 0
-    chain: List[Optional[str]] = field(default_factory=list)
+    chain: List[Optional[str]] = Field(default_factory=list)
 
 
 class EventSystem:
@@ -103,6 +103,14 @@ class EventSystem:
         self.active_prev_id = None
         return node
 
+    def judge_response(self, user_input: str) -> Optional[str]:
+        """判断用户对事件链的回应：accept / reject / 不明确（None）。"""
+        if self._is_accept(user_input):
+            return "accept"
+        if self._is_reject(user_input):
+            return "reject"
+        return None
+
     def process_response(self, user_input: str) -> Optional[EventNode]:
         """处理事件链中的用户响应，返回下一步应执行的节点。
 
@@ -122,9 +130,10 @@ class EventSystem:
             return None
 
         accept, reject = current.chain[0], (current.chain[1] if len(current.chain) > 1 else None)
-        if self._is_accept(user_input):
+        attitude = self.judge_response(user_input)
+        if attitude == "accept":
             target = accept
-        elif self._is_reject(user_input):
+        elif attitude == "reject":
             target = reject
         else:
             return None  # 不明确，等待用户再次表态

@@ -31,7 +31,7 @@
           :key="msg.id"
           class="bubble"
         >
-          {{ msg.display }}
+          <span ref="bubbleTexts" :data-id="msg.id"></span>
           <span v-if="msg.typing" class="cursor">▌</span>
         </div>
       </div>
@@ -139,35 +139,98 @@
                   </section>
                 </div>
 
-                <!-- ===== 聊天记录页 ===== -->
-                <div v-if="activeConsoleTab === 'records'" class="tab-page">
-                  <section class="console-section">
-                    <div class="records-toolbar">
-                      <h3>聊天记录（{{ messages.length }}）</h3>
-                      <button class="console-btn small" @click="clearChat">清空</button>
-                    </div>
-                    <div v-if="messages.length === 0" class="records-empty">
-                      暂无聊天记录
-                    </div>
-                    <div v-else class="records-list">
-                      <div v-for="msg in messages" :key="msg.id" class="record-item">
-                        <div class="record-header">
-                          <span class="record-role" :class="msg.role">{{ msg.role === 'user' ? '我' : '爱莉希雅' }}</span>
-                          <button class="record-del" @click="deleteMessage(msg.id)" title="删除">✕</button>
-                        </div>
-                        <div class="record-content">{{ msg.content }}</div>
-                      </div>
-                    </div>
-                  </section>
-                </div>
+                <!-- ===== 记忆页（统一模块，内分短期/长期记忆） ===== -->
+                <div v-if="activeConsoleTab === 'memory'" class="tab-page">
+                  <div class="memory-subtabs">
+                    <button
+                      class="memory-subtab"
+                      :class="{ active: memorySubtabs === 'short' }"
+                      @click="memorySubtabs = 'short'"
+                    >短期记忆</button>
+                    <button
+                      class="memory-subtab"
+                      :class="{ active: memorySubtabs === 'long' }"
+                      @click="memorySubtabs = 'long'"
+                    >长期记忆</button>
+                  </div>
 
-                <!-- ===== 设置页 ===== -->
-                <div v-if="activeConsoleTab === 'settings'" class="tab-page">
-                  <section class="console-section">
-                    <h3>对话管理</h3>
-                    <button class="console-btn" @click="clearChat">清除聊天记录</button>
-                    <button class="console-btn" @click="resetAll">重置对话状态</button>
-                  </section>
+                  <!-- 短期记忆：浏览 / 处理当前会话聊天记录 -->
+                  <div v-if="memorySubtabs === 'short'">
+                    <section class="console-section">
+                      <div class="records-toolbar">
+                        <h3>当前会话聊天记录（{{ messages.length }}）</h3>
+                        <button class="console-btn small" @click="resetSession">清空当前会话</button>
+                      </div>
+                      <div v-if="messages.length === 0" class="records-empty">暂无聊天记录</div>
+                      <div v-else class="records-list">
+                        <div v-for="msg in messages" :key="msg.id" class="record-item">
+                          <div class="record-header">
+                            <span class="record-role" :class="msg.role">{{ msg.role === 'user' ? '我' : '爱莉希雅' }}</span>
+                            <button class="record-del" @click="deleteMessage(msg.id)" title="删除">✕</button>
+                          </div>
+                          <div class="record-content">{{ msg.content }}</div>
+                        </div>
+                      </div>
+                    </section>
+                  </div>
+
+                  <!-- 长期记忆：AI 印象 / 历史摘要 / 长期记录处理 -->
+                  <div v-if="memorySubtabs === 'long'">
+                    <section class="console-section">
+                      <div class="records-toolbar">
+                        <h3>AI 对你的印象</h3>
+                        <button class="console-btn small" @click="refreshMemory">刷新</button>
+                      </div>
+                      <div v-if="memoryEmpty" class="records-empty">暂无长期记忆（对话后会自动抽取）</div>
+                      <div v-else class="memory-list">
+                        <div v-for="(items, category) in memoryGroups" :key="category" class="memory-cat">
+                          <div class="memory-cat-title">{{ memoryCategoryLabel(category) }}</div>
+                          <div v-for="item in items" :key="item.id" class="memory-item">
+                            <div class="memory-item-head">
+                              <span class="memory-key">{{ item.key }}</span>
+                              <span class="memory-badge" :class="{ guess: item.confirmed === 0 }">
+                                {{ item.confirmed ? '已确认' : 'AI 猜测' }}
+                              </span>
+                              <span class="memory-imp">重要度 {{ item.importance }}</span>
+                              <button class="record-del" @click="deleteMemory(item.id)" title="删除">✕</button>
+                            </div>
+                            <div class="memory-value">{{ item.value }}</div>
+                            <div class="memory-actions">
+                              <button class="console-btn small" @click="confirmMemory(item)">确认</button>
+                              <button class="console-btn small" @click="correctMemory(item)">纠正</button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </section>
+
+                    <section class="console-section">
+                      <div class="records-toolbar">
+                        <h3>历史会话摘要</h3>
+                        <button class="console-btn small" @click="refreshSummaries">刷新</button>
+                      </div>
+                      <div v-if="summaries.length === 0" class="records-empty">暂无历史摘要（跨会话记忆会在对话空闲后自动生成）</div>
+                      <div v-else class="records-list">
+                        <div v-for="s in summaries" :key="s.session_id" class="record-item">
+                          <div class="record-header">
+                            <span class="record-role">会话 {{ s.session_id }}</span>
+                            <span class="summary-time">{{ s.created_at }}</span>
+                          </div>
+                          <div class="record-content">
+                            <template v-if="s.topics.length">话题：{{ s.topics.join('、') }}<br /></template>
+                            <template v-if="s.open_plans.length">约定：{{ s.open_plans.join('、') }}<br /></template>
+                            <template v-if="s.emotional_state">情绪倾向：{{ s.emotional_state }}</template>
+                          </div>
+                        </div>
+                      </div>
+                    </section>
+
+                    <section class="console-section">
+                      <h3>长期记录处理</h3>
+                      <button class="console-btn" @click="clearAllChats">清除全部聊天记录与摘要（仍记得你是谁）</button>
+                      <button class="console-btn danger" @click="forgetAll">忘记我（彻底清除一切长期记忆）</button>
+                    </section>
+                  </div>
                 </div>
               </div>
             </div>

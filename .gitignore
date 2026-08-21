@@ -10,6 +10,7 @@ env/
 *.db
 *.sqlite
 *.sqlite3
+data/
 
 # 备份文件
 *.bak.*
@@ -26,3 +27,6 @@ env/
 
 # 日志
 *.log
+
+# 运行时进程号文件
+.pid
