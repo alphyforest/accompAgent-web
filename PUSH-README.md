@@ -9,11 +9,11 @@
 |------|-----|
 | 仓库根目录 | `D:\lab\Agent\ai_agent` |
 | 远程 | `https://github.com/alphyforest/accompAgent.git`（origin） |
-| 主分支 | `main` @ `acc9bd6`（功能更新 + 发布说明，**不做发布**，继续桌面化） |
+| 主分支 | `main` @ `59c2c86`（功能更新 + 发布说明，**不做发布**，继续桌面化） |
 | 发布分支 | `release/web` @ `1d9b2ac`（Web 版发布线，锁住当前目录结构） |
 | 版本 tag | `v0.2.0` @ `1d9b2ac`（Web 版首个发布版本） |
 
-> `release/web` 与 `v0.2.0` 锚定在 Web 版代码快照 `1d9b2ac`；`main` 在此基础上额外多一个文档提交 `acc9bd6`。
+> `release/web` 与 `v0.2.0` 锚定在 Web 版代码快照 `1d9b2ac`；`main` 在此基础上多出文档提交 `59c2c86`。
 > 自此各自演进：
 > - `main`：桌面化、多引擎、目录重构，此后不打包发布
 > - `release/web`：Web 版长期发布线，只发布这版结构
