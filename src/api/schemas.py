@@ -93,9 +93,17 @@ class CharacterMeta(BaseModel):
     description: str
 
 
+class CharacterInitState(BaseModel):
+    """角色初始状态（初始气氛 / 初始情绪）。"""
+
+    mood: int = 0
+    emotion: str = "idle"
+
+
 class CharacterResponse(BaseModel):
     """角色卡下发（改动三：立绘映射/默认情绪由后端从角色卡读出，前端只展示）。"""
 
     meta: CharacterMeta
     portrait_map: Dict[str, str]
     default_emotion: str
+    init_state: CharacterInitState

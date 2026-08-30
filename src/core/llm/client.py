@@ -9,7 +9,7 @@ from openai import AsyncOpenAI
 from src.config.settings import Settings
 
 # 抽取响应外围可能出现的代码围栏，剥离后按 JSON 解析
-_CODE_FENCE_PATTERN = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+_CODE_FENCE_PATTERN = re.compile(r"^\x60\x60\x60(?:json)?\s*|\s*\x60\x60\x60$", re.MULTILINE)
 
 # 即时抽取注册的函数工具名（方案 B：function calling 实时写入）
 MEMORY_TOOL_NAME = "save_user_memory"
@@ -40,6 +40,48 @@ class LLMClient:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
 
+    async def chat(
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: str = "auto",
+        max_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """非流式对话，支持函数调用（ToolLoop 运行时用，规格 §5）。
+
+        返回规整化消息：{"content", "tool_calls", "finish_reason"}；
+        tool_calls 为 [{"id", "name", "arguments"}]（arguments 已解析为 dict）。
+        """
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "extra_body": {"reasoning_effort": self.reasoning_effort},
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = tool_choice
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        response = await self.client.chat.completions.create(**kwargs)
+        message = response.choices[0].message
+        raw_calls = getattr(message, "tool_calls", None) or []
+        tool_calls: List[Dict[str, Any]] = []
+        for call in raw_calls:
+            try:
+                arguments = json.loads(call.function.arguments or "{}")
+            except ValueError:
+                arguments = {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            tool_calls.append(
+                {"id": call.id or "", "name": call.function.name or "", "arguments": arguments}
+            )
+        return {
+            "content": message.content or "",
+            "tool_calls": tool_calls,
+            "finish_reason": response.choices[0].finish_reason,
+        }
+
     async def simple_chat(self, user_input: str) -> str:
         """非流式调用，返回完整回复。"""
         response = await self.client.chat.completions.create(
@@ -52,7 +94,7 @@ class LLMClient:
     async def extract_json(self, messages: List[Dict[str, str]]) -> Optional[Dict[str, Any]]:
         """结构化抽取：要求模型输出 JSON 对象，解析失败返回 None（调用方负责降级）。
 
-        使用 ``response_format={"type": "json_object"}`` 约束输出，
+        使用 response_format={"type": "json_object"} 约束输出，
         兼容 openai 1.50 与 2.x 及 DeepSeek 兼容接口。
         """
         try:
@@ -78,9 +120,9 @@ class LLMClient:
     async def extract_user_facts(self, messages: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         """函数调用抽取用户画像/事实（方案 B 实时写入）。
 
-        注册 ``save_user_memory`` 工具，LLM 自行决定要保存哪些用户明确表达的信息，
-        返回规范化的事实列表 ``[{"category","key","value","importance"}]``；
-        失败或无工具调用返回 ``[]``（调用方自行降级，不阻塞主对话）。
+        注册 \x60\x60save_user_memory\x60\x60 工具，LLM 自行决定要保存哪些用户明确表达的信息，
+        返回规范化的事实列表 [{"category","key","value","importance"}]；
+        失败或无工具调用返回 []（调用方自行降级，不阻塞主对话）。
         """
         tools = [
             {

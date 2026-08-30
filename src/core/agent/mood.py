@@ -69,8 +69,8 @@ class MoodSystem:
             return "greet"
         if self.mood > -20:
             return "idle"
-        if self.mood > -50:
-            return "sad"
+        #if self.mood > -50:
+        #    return "sad"
         return "sad"
 
     def reset(self) -> None:

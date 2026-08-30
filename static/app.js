@@ -313,13 +313,17 @@ createApp({
         this.moodLabel = data.label;
       } catch (e) { /* ignore */ }
     },
-    // 拉取角色卡下发表（情绪->立绘路径 + 默认情绪），改动三：前端不再写死映射
+    // 拉取角色卡下发表（情绪->立绘路径 + 默认情绪/初始状态），改动三：前端不再写死映射
     async refreshCharacter() {
       try {
         const response = await request(API_BASE + '/character');
         const data = await response.json();
         this.portraitMap = data.portrait_map || {};
         this.defaultEmotion = data.default_emotion || 'idle';
+        // 初始情绪（init_state.emotion）：仅在尚无对话时生效（角色切换复位，蓝图 §3.1）
+        if (this.messages.length === 0) {
+          this.emotion = (data.init_state && data.init_state.emotion) || this.defaultEmotion;
+        }
       } catch (e) { /* ignore */ }
     },
     // 轮询主动发言并展示为角色气泡（改动四·第二步）

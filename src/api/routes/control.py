@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from src.api.dependencies import get_engine, get_events, get_mood, get_scheduler
 from src.api.schemas import (
+    CharacterInitState,
     CharacterMeta,
     CharacterResponse,
     MemoryCorrectRequest,
@@ -89,6 +90,7 @@ async def get_character(engine: DialogueEngine = Depends(get_engine)) -> Charact
         meta=CharacterMeta(id=card.meta.id, name=card.meta.name, description=card.meta.description),
         portrait_map=card.portrait_map,
         default_emotion=card.output_protocol.default_emotion,
+        init_state=CharacterInitState(mood=card.init_state.mood, emotion=card.init_state.emotion),
     )
 
 

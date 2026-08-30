@@ -10,6 +10,8 @@ from src.core.agent.triggers import InitiativeTriggerMatcher
 from src.core.character.card import CharacterCard, InitiativeTrigger, TriggerCondition, load_character_card
 from src.core.memory.long_term import LongTermMemory
 from src.core.memory.short_term import ShortTermMemory
+from src.core.tools.builtin import build_now_tool
+from src.core.tools.registry import ToolRegistry
 
 from tests.conftest import CHARACTER_CONFIG_DIR
 
@@ -28,6 +30,7 @@ class FakeLLMClient:
         self.extract_error = extract_error
         self.calls: List[List[Dict[str, str]]] = []
         self.extract_calls: List[List[Dict[str, str]]] = []
+        self.chat_calls: List[Dict[str, Any]] = []
 
     async def stream(self, messages: List[Dict[str, str]]) -> AsyncGenerator[str, None]:
         self.calls.append(messages)
@@ -36,6 +39,17 @@ class FakeLLMClient:
 
     async def simple_chat(self, user_input: str) -> str:
         return "好的"
+
+    async def chat(
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: str = "auto",
+        max_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Fake：记录调用并返回固定内容（无工具调用）。"""
+        self.chat_calls.append({"messages": messages, "tools": tools})
+        return {"content": self.reply, "tool_calls": []}
 
     async def extract_json(self, messages: List[Dict[str, str]]) -> Optional[Dict[str, Any]]:
         self.extract_calls.append(messages)
@@ -55,6 +69,10 @@ def build_engine(
     extract_error: bool = False,
     card: Optional[CharacterCard] = None,
     matcher: Optional[InitiativeTriggerMatcher] = None,
+    tool_registry: Optional[ToolRegistry] = None,
+    tool_rounds: int = 4,
+    tool_call_timeout: float = 30.0,
+    tool_overall_timeout: float = 120.0,
 ) -> DialogueEngine:
     if card is None:
         card = load_character_card(CHARACTER_CONFIG_DIR)  # 默认用真实角色卡
@@ -72,6 +90,10 @@ def build_engine(
         segment_max=segment_max,
         idle_timeout=idle_timeout,
         inject_top_k=inject_top_k,
+        tool_registry=tool_registry,
+        tool_rounds=tool_rounds,
+        tool_call_timeout=tool_call_timeout,
+        tool_overall_timeout=tool_overall_timeout,
     )
 
 
@@ -376,3 +398,59 @@ async def test_proactive_message_source_tagged():
     assert replies  # 普通回复带 reply 来源
     # 主动发言不应被当作 key_facts 来源：转写会标注 [主动]（此处仅验证 buffer 来源可区分）
     assert any(message.get("source") == "initiative" for message in buffer)
+
+
+def test_engine_init_emotion_from_card():
+    """回归（高危复查项）：引擎初始情绪取自角色卡 init_state.emotion，随配置生效。"""
+    card = load_character_card(CHARACTER_CONFIG_DIR)
+    card.init_state.emotion = "greet"
+    engine = build_engine(card=card)
+    assert engine.init_emotion == "greet"
+
+# ================================================================ 第三阶段：工具循环（ToolLoop）委托
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_uses_tool_loop_when_registry_present():
+    """注册表存在时：对话走 ToolLoop（chat 调用），最终文本经情绪解析按既有协议输出。"""
+    registry = ToolRegistry()
+    registry.register(build_now_tool())
+    engine = build_engine(reply="[情绪:happy]我查一下时间~", tool_registry=registry)
+    full = ""
+    async for chunk in engine.chat_stream("现在几点了", "s1"):
+        full += chunk
+    assert full.startswith("[[EMOTION:happy]]")
+    assert "我查一下时间~" in full
+    assert engine.llm.chat_calls  # 走了 chat（ToolLoop）
+    history = engine.memory.get_history("s1")
+    assert history[-1]["content"] == "我查一下时间~"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_falls_back_without_tools():
+    """无注册表时：行为与现有一致（Stream），不调用 chat。"""
+    engine = build_engine(reply="[情绪:happy]你好呀~")
+    full = ""
+    async for chunk in engine.chat_stream("你好", "s1"):
+        full += chunk
+    assert full.startswith("[[EMOTION:happy]]")
+    assert not engine.llm.chat_calls
+
+
+@pytest.mark.asyncio
+async def test_build_system_prompt_injects_time_context_when_tools_enabled():
+    """规格 §8：工具可用时 system prompt 必带当前时间上下文。"""
+    registry = ToolRegistry()
+    registry.register(build_now_tool())
+    engine = build_engine(tool_registry=registry)
+    prompt = await engine._build_system_prompt("s1")
+    assert "[当前时间]" in prompt
+    assert "当前时间:" in prompt and "+" in prompt  # ISO 8601 带偏移
+
+
+@pytest.mark.asyncio
+async def test_build_system_prompt_no_time_without_tools():
+    engine = build_engine()
+    prompt = await engine._build_system_prompt("s1")
+    assert "当前时间:" not in prompt
+

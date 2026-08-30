@@ -63,6 +63,4 @@ git ls-remote --tags origin
 
 ## 三、重要：令牌安全
 
-- 你的 GitHub 令牌曾以明文存在于 `D:\lab\Agent\doc\git-access-token.txt`（不在 git 仓库内，**不会被推送**，但明文躺在磁盘上有风险）。
-- **强烈建议**：本次推送完成后，前往 GitHub → Settings → Developer settings → Personal access tokens，将 `ghp_Eq5x...` 令牌 **Revoke（撤销）**，并按需重建。
-- 之后避免在命令行明文粘贴令牌；改用「凭据管理器」或只读密钥存放。
+- 避免在命令行明文粘贴令牌；改用「凭据管理器」或只读密钥存放。

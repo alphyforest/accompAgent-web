@@ -60,6 +60,22 @@ def test_get_character():
     assert data["default_emotion"] == "idle"
 
 
+def test_get_character_init_state():
+    """角色卡下发含初始状态（init_state 已接线，非死配置）：接口透出 init_state。"""
+    data = client.get("/api/character").json()
+    assert data["init_state"]["mood"] == 0
+    assert data["init_state"]["emotion"] == "idle"
+
+
+def test_engine_mood_seeded_from_card_init_state():
+    """回归（高危复查项）：引擎气氛值以角色卡 init_state.mood 初始化（不再恒为 0）。"""
+    engine = get_engine()
+    assert engine.card is not None
+    # 引擎初始气氛值必须与角色卡声明的初始状态一致（防回退为无参 MoodSystem()）
+    assert engine.mood.mood == engine.card.init_state.mood
+    assert engine.init_emotion == engine.card.init_state.emotion
+
+
 def test_get_initiative_empty():
     """主动发言接口：未触发时为合法空列表。"""
     response = client.get("/api/initiative")

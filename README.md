@@ -15,6 +15,7 @@
 - **控制台**：立绘预览、背景切换、BGM 播放、聊天记录、设置
 - **短期记忆**：滑动窗口对话历史
 - **语义化长期记忆**（第二阶段）：跨会话记住用户画像/喜好/事实、延续话题、跟进约定（惰性总结 + LLM 结构化抽取 + top-k 注入 + 遗忘策略）
+- **MCP 工具引擎**（第三阶段）：统一的工具契约/注册表/ToolLoop 运行时，接入外部 Agenda MCP Server（stdio），对话即可「查日程/建日程/改完成/删除/查课表」；工具可用时自动注入当前时间，异常自动降级普通对话
 
 ## 目录结构
 
@@ -29,12 +30,14 @@ ai_agent/
 │   │   ├── settings.py     # 配置（pydantic-settings，支持 .env）
 │   │   └── roles/          # 角色配置：system_prompt.txt / events.json / phrases/
 │   ├── core/
-│   │   ├── agent/          # 对话引擎、事件系统、气氛值
+│   │   ├── agent/          # 对话引擎、ToolLoop、事件系统、气氛值
 │   │   ├── llm/            # DeepSeek 客户端与 prompt 构建
 │   │   ├── memory/         # 短期记忆
-│   │   └── character/      # 人设加载、语料
-│   ├── mcp_gateway/        # MCP Server（预留）
+│   │   ├── character/      # 人设加载、语料
+│   │   └── tools/          # 工具引擎：契约/注册表/运行时/时间注入/备份/MCP 适配器
+│   ├── mcp_gateway/        # MCP Server（预留脚手架，未被业务调用）
 │   └── utils/
+├── scripts/                # 工具脚本（agenda_mcp_smoke.py 真实 server 联调）
 ├── static/                 # 前端（Vue3 + 原生 JS/CSS，免构建）
 │   ├── index.html
 │   ├── app.js / app.css
@@ -105,6 +108,12 @@ python run.py stop
 
 > 冷书记录存内存（重启清零）。条件表达式支持简单 `eval`（如 `silence_seconds > 120`）。
 
+### 工具引擎（第三阶段）
+
+- **对话即日程管理**：当 Agenda MCP Server 可用时，Agent 可调用日程/课表工具（查、建、改、完成、删、课表、学期配置）。工具描述自带 ISO 8601 时间写法与「先查重」语义，模型会先获知当前时间再换算用户口语时间（「明天」「周五 3 点」）。
+- **降级保障**：工具服务不可用时自动禁用相应工具，对话行为与未接入前一致；任何工具异常不会中断回复。
+- **联调脚本**：`python scripts/agenda_mcp_smoke.py` 使用临时数据目录对真实 Server 做 7 工具 + 读 3 + 写闭环验证。
+
 ### 事件系统（解耦中）
 
 事件链式状态机保留实现但**不再由日常对话自动触发**（`invite`/`share` 测试密钥已移除），预留做"剧情模式"插件。可用 `/api/event/trigger` 手动按节点 id 触发以调试状态机。
@@ -157,6 +166,11 @@ pytest
 | `MEMORY_SEGMENT_MAX_MESSAGES` | `30` | 惰性总结条数阈值 |
 | `MEMORY_INJECT_TOP_K` | `8` | 记忆注入条数上限 |
 | `MEMORY_FORGET_DAYS` / `MEMORY_FORGET_DECAY` | `30` / `2` | 遗忘策略参数 |
+| `AGENDA_MCP_ENABLED` | `true` | MCP 工具引擎总开关 |
+| `AGENDA_MCP_COMMAND` / `AGENDA_MCP_ARGS` | `node` / tsx+server.ts | Agenda MCP Server 启动方式（勿直接 spawn .cmd） |
+| `AGENDA_DATA_PATH` | `F:\lab\agenda1\agenda-data.json` | 共享数据文件（与 agenda 桌面端同一文件） |
+| `AGENDA_TOOL_ROUNDS` / `AGENDA_TOOL_TIMEOUT` / `AGENDA_TOOL_OVERALL_TIMEOUT` | `4` / `30` / `120` | ToolLoop 轮数与超时（秒） |
+| `AGENDA_DATA_BACKUP_DIR` | `./data/agenda_backup` | agenda-data.json 每日备份目录 |
 
 ## 许可
 

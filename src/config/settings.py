@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     reasoning_effort: str = "low"
 
     # 服务
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 5000
 
     # 路径
@@ -77,6 +77,24 @@ class Settings(BaseSettings):
         "请别",
         "不要这样",
     ]
+
+    # 第三阶段：MCP 工具引擎（Agenda MCP Server 接入，规格 §10）
+    # 总开关；关闭则 agenda 工具不入注册表（内置 now 演示工具仍保留）
+    agenda_mcp_enabled: bool = True
+    # 启动器：node + tsx CLI 入口（Windows 避免直接 spawn .cmd；可含 F:\lab\agenda1 绝对路径）
+    agenda_mcp_command: str = "node"
+    agenda_mcp_args: List[str] = [
+        r"F:\lab\agenda1\node_modules\tsx\dist\cli.mjs",
+        r"F:\lab\agenda1\mcp\server.ts",
+    ]
+    # 共享数据文件（与 agenda 桌面端同一文件）
+    agenda_data_path: str = r"F:\lab\agenda1\agenda-data.json"
+    # ToolLoop 参数
+    agenda_tool_rounds: int = 4
+    agenda_tool_timeout: int = 30
+    agenda_tool_overall_timeout: int = 120
+    # 每日备份目录（规格 §7）
+    agenda_data_backup_dir: str = "./data/agenda_backup"
 
 
 # 全局配置单例；api_key 等必填项在运行时从 .env / 环境变量注入，
