@@ -29,19 +29,14 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 5000
 
-    # 路径
-    phrases_dir: str = "./phrases"
+    # 路径（config_dir 为只读资源，走 resource_path；可写路径经 utils.paths.resolve_user_path）
     config_dir: str = "./src/config/roles"
-    data_dir: str = "./data"
 
     # 记忆
     max_history: int = 10
 
-    # 事件
-    global_cooldown: int = 3
-
     # 第二阶段：语义化长期记忆
-    memory_db_path: str = "./data/memory.db"  # 长期记忆 SQLite 文件路径
+    memory_db_path: str = "memory.db"  # 长期记忆 SQLite 文件名/路径（相对路径落入用户数据目录）
     memory_idle_timeout_minutes: int = 15  # 惰性总结：空闲超时（分钟）后视为上一会话结束
     memory_segment_max_messages: int = 30  # 惰性总结：条数阈值兜底分段
     memory_inject_top_k: int = 8  # 记忆注入 top-k 上限
@@ -81,20 +76,17 @@ class Settings(BaseSettings):
     # 第三阶段：MCP 工具引擎（Agenda MCP Server 接入，规格 §10）
     # 总开关；关闭则 agenda 工具不入注册表（内置 now 演示工具仍保留）
     agenda_mcp_enabled: bool = True
-    # 启动器：node + tsx CLI 入口（Windows 避免直接 spawn .cmd；可含 F:\lab\agenda1 绝对路径）
-    agenda_mcp_command: str = "node"
-    agenda_mcp_args: List[str] = [
-        r"F:\lab\agenda1\node_modules\tsx\dist\cli.mjs",
-        r"F:\lab\agenda1\mcp\server.ts",
-    ]
-    # 共享数据文件（与 agenda 桌面端同一文件）
-    agenda_data_path: str = r"F:\lab\agenda1\agenda-data.json"
+    # 启动器（R6：默认空 = 未配置时来源不可用但不影响启动；本地部署可按需填 node + tsx 入口）
+    agenda_mcp_command: str = ""
+    agenda_mcp_args: List[str] = []
+    # 共享数据文件（与 agenda 桌面端同一文件，可选）
+    agenda_data_path: str = ""
     # ToolLoop 参数
     agenda_tool_rounds: int = 4
     agenda_tool_timeout: int = 30
     agenda_tool_overall_timeout: int = 120
     # 每日备份目录（规格 §7）
-    agenda_data_backup_dir: str = "./data/agenda_backup"
+    agenda_data_backup_dir: str = ""  # 留空时默认 user_backup_path()
 
 
 # 全局配置单例；api_key 等必填项在运行时从 .env / 环境变量注入，

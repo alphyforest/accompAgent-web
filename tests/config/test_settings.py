@@ -11,15 +11,16 @@ def test_settings_defaults(monkeypatch):
     assert settings.deepseek_api_key == "sk-test"
     assert settings.deepseek_model == "deepseek-v4-flash"
     assert settings.max_history == 10
-    assert settings.global_cooldown == 3
     assert settings.port == 5000
-    # 第三阶段：MCP 工具引擎配置默认值（规格 §10）
+    # 第三阶段：MCP 工具引擎配置默认值（R6 起未配置默认不可用）
     assert settings.agenda_mcp_enabled is True
-    assert settings.agenda_mcp_command == "node"
+    assert settings.agenda_mcp_command == ""
+    assert settings.agenda_mcp_args == []
+    assert settings.agenda_data_path == ""
+    assert settings.agenda_data_backup_dir == ""
     assert settings.agenda_tool_rounds == 4
     assert settings.agenda_tool_timeout == 30
     assert settings.agenda_tool_overall_timeout == 120
-    assert settings.agenda_data_backup_dir == "./data/agenda_backup"
 
 
 def test_settings_requires_api_key(monkeypatch):

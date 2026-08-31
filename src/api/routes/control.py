@@ -9,7 +9,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from src.api.dependencies import (
     ApplicationDependencyUnavailable,
     get_character_query_service,
-    get_events,
     get_initiative_query_service,
     get_memory_application_service,
     get_mood,
@@ -30,7 +29,6 @@ from src.api.schemas import (
 from src.application.contracts import MemoryItemView, SummaryView, UIEvent
 from src.application.control_service import MemoryApplicationService, ResetApplicationService
 from src.application.query_service import CharacterQueryService, InitiativeQueryService
-from src.core.agent.event import EventSystem
 from src.core.agent.mood import MoodSystem
 
 router = APIRouter()
@@ -47,14 +45,9 @@ def _summary_item(view: SummaryView) -> SummaryItem:
 
 
 @router.get("/status", response_model=StatusResponse)
-async def get_status(mood: MoodSystem = Depends(get_mood), events: EventSystem = Depends(get_events)) -> StatusResponse:
-    """查询服务状态（EventSystem 字段属遗留兼容，R6 随 /api/status 一起退场）。"""
-    return StatusResponse(
-        mood=mood.mood,
-        mood_label=mood.get_label(),
-        active_chain=events.active_node,
-        cooldown=events.cooldown,
-    )
+async def get_status(mood: MoodSystem = Depends(get_mood)) -> StatusResponse:
+    """查询服务状态（R6：仅保留气氛快照，事件系统字段已退场）。"""
+    return StatusResponse(mood=mood.mood, mood_label=mood.get_label())
 
 
 @router.post("/reset", response_model=ResetResponse)

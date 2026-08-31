@@ -35,7 +35,7 @@ from src.core.tools.registry import ToolRegistry
 from src.core.tools.runtime import ToolRuntime
 from src.core.tools.sources.mcp import McpToolSource
 from src.core.tools.tool_loop import ToolLoop
-from src.utils.paths import resource_path
+from src.utils.paths import resolve_user_path, resource_path, user_backup_path
 
 
 @lru_cache(maxsize=1)
@@ -48,7 +48,7 @@ def get_engine() -> DialogueEngine:
     card = load_character_card(config_dir)
     # 用角色卡 init_state 初始化气氛值（蓝图 §3.1：切换角色时按初始状态复位）
     mood = MoodSystem(initial_mood=card.init_state.mood)
-    long_term = LongTermMemory(str(resource_path(settings.memory_db_path)))
+    long_term = LongTermMemory(str(resolve_user_path(settings.memory_db_path, "data")))
 
     system_prompt = load_system_prompt(config_dir, card.system_prompt_file)
     # 语料位于角色配置目录下的 phrases 子目录
@@ -94,7 +94,7 @@ def get_tool_runtime() -> ToolRuntime:
     registry = ToolRegistry()
     registry.register(build_now_tool())
     sources = []
-    if settings.agenda_mcp_enabled:
+    if settings.agenda_mcp_enabled and settings.agenda_mcp_command and settings.agenda_mcp_args:
         sources.append(
             McpToolSource(
                 command=settings.agenda_mcp_command,
@@ -107,7 +107,7 @@ def get_tool_runtime() -> ToolRuntime:
         registry,
         sources,
         backup_data_path=settings.agenda_data_path,
-        backup_dir=settings.agenda_data_backup_dir,
+        backup_dir=settings.agenda_data_backup_dir or str(user_backup_path()),
     )
     for source in sources:
         source._on_unavailable = lambda names: registry.disable_names(names)

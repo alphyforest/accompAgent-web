@@ -1,4 +1,4 @@
-"""MCP Server（预留），通过 FastMCP 暴露核心业务能力为 Tool。"""
+"""MCP Server（LEGACY，R6：见 client.py 同款说明，拟删除）。"""
 
 from typing import Any, Dict, Optional
 

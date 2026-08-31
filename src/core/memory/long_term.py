@@ -16,6 +16,8 @@ from typing import Dict, List, Optional
 import aiosqlite
 from pydantic import BaseModel
 
+from src.utils.logger import logger
+
 
 class MemoryRecord(BaseModel):
     """用户记忆条目（领域模型，Pydantic，rules.md §15.1）。"""
@@ -64,9 +66,35 @@ class LongTermMemory:
             self._initialized = True
 
     async def init_db(self) -> None:
-        """初始化数据库表结构（集中维护 DDL，禁止业务代码拼接）。"""
+        """初始化数据库表结构 + schema_version 登记（R6 §9.3）。"""
         async with aiosqlite.connect(self.db_path) as db:
             await db.executescript(DDL)
+            await db.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
+                (str(SCHEMA_VERSION),),
+            )
+            await db.commit()
+        await self._detect_legacy_tables()
+
+    @property
+    def schema_version(self) -> int:
+        """当前支持的 schema 版本（新库登记；旧库无损识别为 1）。"""
+        return SCHEMA_VERSION
+
+    async def _detect_legacy_tables(self) -> None:
+        """识别旧库遗留表（conversations / event_chains）：保留不改、仅日志提示。
+
+        旧库遗留表本阶段只识别和保留，不直接 DROP（PLAN-010 §9.3）；
+        未来由对话原文仓储 / EntertainmentRepository 独立接管。
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name IN ('conversations', 'event_chains')"
+            )
+            names = sorted(row[0] for row in await cursor.fetchall())
+        if names:
+            logger.info("旧库遗留表保留（不 DROP）：{}", names)
 
     # ---------------------------------------------------------------- 用户记忆
 
@@ -322,87 +350,17 @@ class LongTermMemory:
             return [str(item) for item in data]
         return []
 
-    # ---------------------------------------------------------------- 对话原文（未接线，保留）
+    # ---------------------------------------------------------------- schema 版本与历史表（R6 §9.3）
+    # conversations / event_chains 历史预留表：本版本不再创建与写入，
+    # 旧库遗留表由 _detect_legacy_tables 识别并保留（不 DROP）。
 
-    async def save_conversation(self, session_id: str, role: str, content: str, mood: Optional[int] = None) -> None:
-        """保存一条对话记录（预留，业务未接线）。"""
-        await self._ensure_initialized()
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "INSERT INTO conversations (session_id, role, content, mood) VALUES (?, ?, ?, ?)",
-                (session_id, role, content, mood),
-            )
-            await db.commit()
 
-    async def get_history(self, session_id: str, limit: int = 10) -> List[Dict[str, str]]:
-        """查询指定会话最近的历史消息（预留，业务未接线）。"""
-        await self._ensure_initialized()
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "SELECT role, content FROM conversations WHERE session_id = ? ORDER BY id DESC LIMIT ?",
-                (session_id, limit),
-            )
-            rows = list(await cursor.fetchall())
-        return [{"role": row[0], "content": row[1]} for row in rows[::-1]]
-
-    # ---------------------------------------------------------------- 事件链状态（保留）
-
-    async def save_chain_state(self, session_id: str, chain_id: str, current_step: int, is_active: bool) -> None:
-        """保存或更新事件链状态（预留，业务未接线）。"""
-        await self._ensure_initialized()
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "INSERT INTO event_chains (session_id, chain_id, current_step, is_active) "
-                "VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(session_id) DO UPDATE SET "
-                "chain_id = excluded.chain_id, "
-                "current_step = excluded.current_step, "
-                "is_active = excluded.is_active, "
-                "updated_at = CURRENT_TIMESTAMP",
-                (session_id, chain_id, current_step, int(is_active)),
-            )
-            await db.commit()
-
-    async def get_chain_state(self, session_id: str) -> Optional[Dict[str, object]]:
-        """查询事件链状态（预留，业务未接线）。"""
-        await self._ensure_initialized()
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "SELECT chain_id, current_step, is_active FROM event_chains WHERE session_id = ?",
-                (session_id,),
-            )
-            row = await cursor.fetchone()
-        if row is None:
-            return None
-        return {"chain_id": row[0], "current_step": row[1], "is_active": bool(row[2])}
-
-    async def clear_chain_state(self, session_id: str) -> None:
-        """清除事件链状态（预留，业务未接线）。"""
-        await self._ensure_initialized()
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("DELETE FROM event_chains WHERE session_id = ?", (session_id,))
-            await db.commit()
-
+SCHEMA_VERSION = 1
 
 DDL = """
-CREATE TABLE IF NOT EXISTS conversations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    mood INTEGER,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_conversations_session_id ON conversations(session_id);
-CREATE INDEX IF NOT EXISTS idx_conversations_created_at ON conversations(created_at);
-
-CREATE TABLE IF NOT EXISTS event_chains (
-    session_id TEXT PRIMARY KEY,
-    chain_id TEXT NOT NULL,
-    current_step INTEGER NOT NULL,
-    is_active BOOLEAN DEFAULT 1,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS user_memory (

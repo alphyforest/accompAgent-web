@@ -6,10 +6,9 @@ from pydantic import BaseModel, Field
 
 
 class ChatRequest(BaseModel):
-    """对话请求。"""
+    """对话请求（R6：移除遗留 history 字段，前端不传、引擎不读）。"""
 
     input: str = Field(..., min_length=1, max_length=2000)
-    history: Optional[List[Dict[str, str]]] = Field(default_factory=list)
     session_id: str = Field(default="default", max_length=64)
 
 
@@ -27,12 +26,10 @@ class MoodResponse(BaseModel):
 
 
 class StatusResponse(BaseModel):
-    """状态响应。"""
+    """状态响应（R6：移除 EventSystem 专属字段 active_chain/cooldown）。"""
 
     mood: int
     mood_label: str
-    active_chain: Optional[str]
-    cooldown: int
 
 
 class ResetResponse(BaseModel):

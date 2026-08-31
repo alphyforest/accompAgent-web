@@ -73,8 +73,8 @@ def stop() -> None:
 
 @app.command()
 def mcp() -> None:
-    """启动 MCP Server（预留）。"""
-    typer.echo("MCP Server 模式（开发中）")
+    """启动 MCP Server（DEPRECATED，R6：真实 MCP 能力已由 core/tools/sources/mcp.py 承担）。"""
+    typer.echo("MCP Server 模式已废弃，请直接运行应用（Agenda 来源经配置接入）")
 
 
 if __name__ == "__main__":

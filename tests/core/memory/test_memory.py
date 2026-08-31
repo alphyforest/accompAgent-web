@@ -32,34 +32,26 @@ def test_short_term_clear():
 
 
 @pytest.mark.asyncio
-async def test_long_term_roundtrip(tmp_path):
+async def test_long_term_legacy_tables_kept_but_not_created(tmp_path):
+    """R6：新库不再创建 conversations/event_chains；旧库遗留表保留不 DROP，语义表正常。"""
     db_path = str(tmp_path / "test.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("CREATE TABLE conversations (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT)")
+        await db.commit()
+
     memory = LongTermMemory(db_path)
     await memory.init_db()
+    assert memory.schema_version == 1
+    # 遗留表保留：不 DROP（未来由其他仓储接管）
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {row[0] for row in await cursor.fetchall()}
+    assert "conversations" in tables
+    assert "event_chains" not in tables  # 新库不再创建
 
-    await memory.save_conversation("s1", "user", "你好", mood=5)
-    await memory.save_conversation("s1", "assistant", "你好呀~", mood=6)
-
-    history = await memory.get_history("s1", limit=10)
-    assert len(history) == 2
-    assert history[0]["role"] == "user"
-    assert history[1]["content"] == "你好呀~"
-
-
-@pytest.mark.asyncio
-async def test_long_term_chain_state(tmp_path):
-    db_path = str(tmp_path / "test.db")
-    memory = LongTermMemory(db_path)
-    await memory.init_db()
-
-    await memory.save_chain_state("s1", "invite_chain", 2, True)
-    state = await memory.get_chain_state("s1")
-    assert state is not None
-    assert state["chain_id"] == "invite_chain"
-    assert state["current_step"] == 2
-
-    await memory.clear_chain_state("s1")
-    assert await memory.get_chain_state("s1") is None
+    # 语义表（user_memory）照常可用
+    record = await memory.save_memory("default", "fact", "city", "上海", importance=5, confirmed=0)
+    assert record.id > 0
 
 
 # ================================================================ 第二阶段：语义记忆

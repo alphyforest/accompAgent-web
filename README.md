@@ -2,11 +2,11 @@
 
 一个基于 **FastAPI + Vue 3** 的 Python 全栈 AI 陪伴对话应用。角色拥有**情绪立绘**、**气氛值系统**、**事件触发**与**流式打字机输出**，可与用户进行带情绪的实时对话。
 
-> 后端由 DeepSeek 大模型驱动，前端为免构建的 Vue 3（CDN 引入），开箱即用。
+> 后端由 DeepSeek 大模型驱动，前端为免构建的 Vue 3（R6 起本地 vendor 引入，不再依赖公网 CDN），开箱即用。
 
 ## 功能特性
 
-- **流式对话**：SSE 流式输出，前端逐字打字机效果（含标点/换行停顿）
+- **流式对话**：SSE（UIEvent v1）真流式输出，前端增量渲染（非缓冲后打字机）
 - **情绪立绘**：根据模型输出与气氛值动态切换角色立绘（思考中 / 喜怒哀乐 / 分享）
 - **气氛值系统**：基于正/负关键词计分，随时间自然衰减，影响触发器与 prompt
 - **角色卡（Character Card）**：人设、情绪标签、解析正则、立绘映射、主动触发器全部由 `character.json` 配置驱动，代码零硬编码
@@ -159,7 +159,7 @@ pytest
 | `DEEPSEEK_API_KEY` | 必填 | DeepSeek API 密钥 |
 | `DEEPSEEK_MODEL` | `deepseek-v4-flash` | 模型名称 |
 | `REASONING_EFFORT` | `low` | 推理深度（`none` 关闭思考可显著降低首字延迟） |
-| `HOST` / `PORT` | `0.0.0.0` / `5000` | 服务监听地址 |
+| `HOST` / `PORT` | `127.0.0.1` / `5000` | 服务监听地址（R6：分发默认本地绑定） |
 | `MAX_HISTORY` | `10` | 短期记忆滑动窗口大小 |
 | `MEMORY_DB_PATH` | `./data/memory.db` | 长期记忆 SQLite 路径 |
 | `MEMORY_IDLE_TIMEOUT_MINUTES` | `60` | 惰性总结空闲超时（分钟） |
@@ -168,7 +168,7 @@ pytest
 | `MEMORY_FORGET_DAYS` / `MEMORY_FORGET_DECAY` | `30` / `2` | 遗忘策略参数 |
 | `AGENDA_MCP_ENABLED` | `true` | MCP 工具引擎总开关 |
 | `AGENDA_MCP_COMMAND` / `AGENDA_MCP_ARGS` | `node` / tsx+server.ts | Agenda MCP Server 启动方式（勿直接 spawn .cmd） |
-| `AGENDA_DATA_PATH` | `F:\lab\agenda1\agenda-data.json` | 共享数据文件（与 agenda 桌面端同一文件） |
+| `AGENDA_DATA_PATH` | 空（可选） | 共享数据文件（与 agenda 桌面端同一文件）；未配置时 Agenda 不可用但不影响启动 |
 | `AGENDA_TOOL_ROUNDS` / `AGENDA_TOOL_TIMEOUT` / `AGENDA_TOOL_OVERALL_TIMEOUT` | `4` / `30` / `120` | ToolLoop 轮数与超时（秒） |
 | `AGENDA_DATA_BACKUP_DIR` | `./data/agenda_backup` | agenda-data.json 每日备份目录 |
 
