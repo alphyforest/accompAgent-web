@@ -4,9 +4,9 @@ import asyncio
 from typing import Any, Dict, List, Optional
 
 import pytest
-from src.core.agent.tool_loop import ToolLoop
 from src.core.tools.registry import ToolRegistry
 from src.core.tools.spec import ToolError, ToolSpec
+from src.core.tools.tool_loop import ToolLoop
 
 
 class FakeToolLLM:

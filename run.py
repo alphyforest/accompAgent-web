@@ -6,7 +6,6 @@ from typing import List
 
 import typer
 import uvicorn
-
 from src.config.settings import settings
 
 app = typer.Typer()

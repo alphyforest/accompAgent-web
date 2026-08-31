@@ -5,12 +5,12 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
-from src.core.agent.tool_loop import ToolLoop
 from src.core.tools.backup import ensure_daily_backup
 from src.core.tools.registry import ToolRegistry
 from src.core.tools.runtime import ToolRuntime
 from src.core.tools.sources.mcp import McpToolSource, _normalize_datetime_arguments, sanitize_mcp_schema
 from src.core.tools.spec import ToolError, ToolSpec
+from src.core.tools.tool_loop import ToolLoop
 
 
 class FakeSession:

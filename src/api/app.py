@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await get_tool_runtime().close()
 
 
-app = FastAPI(title="AI 陪伴 Agent", version="0.4.1", lifespan=lifespan)
+app = FastAPI(title="AI 陪伴 Agent", version="0.5.0", lifespan=lifespan)
 
 app.include_router(chat.router, prefix="/api")
 app.include_router(events.router, prefix="/api")

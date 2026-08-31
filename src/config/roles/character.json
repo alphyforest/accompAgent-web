@@ -32,7 +32,7 @@
     },
     {
       "id": "excited_share",
-      "condition": { "mood_min": 30, "mood_max": 100 },
+      "condition": { "mood_min": 20, "mood_max": 100 },
       "probability": 0.2,
       "cooldown_minutes": 5,
       "prompt": "你现在心情特别好，想和用户分享一件有趣的事。",
@@ -40,8 +40,8 @@
     },
     {
       "id": "comfort_low_mood",
-      "condition": { "mood_min": -100, "mood_max": 10 },
-      "probability": 1.0,
+      "condition": { "mood_min": -100, "mood_max": -20 },
+      "probability": 0.7,
       "cooldown_minutes": 10,
       "prompt": "用户情绪有些低落，请温柔地安慰对方，语气轻缓带有鼓励。",
       "emotion": "sad",

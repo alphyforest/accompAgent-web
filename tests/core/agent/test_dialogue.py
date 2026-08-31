@@ -10,8 +10,6 @@ from src.core.agent.triggers import InitiativeTriggerMatcher
 from src.core.character.card import CharacterCard, InitiativeTrigger, TriggerCondition, load_character_card
 from src.core.memory.long_term import LongTermMemory
 from src.core.memory.short_term import ShortTermMemory
-from src.core.tools.builtin import build_now_tool
-from src.core.tools.registry import ToolRegistry
 
 from tests.conftest import CHARACTER_CONFIG_DIR
 
@@ -69,10 +67,6 @@ def build_engine(
     extract_error: bool = False,
     card: Optional[CharacterCard] = None,
     matcher: Optional[InitiativeTriggerMatcher] = None,
-    tool_registry: Optional[ToolRegistry] = None,
-    tool_rounds: int = 4,
-    tool_call_timeout: float = 30.0,
-    tool_overall_timeout: float = 120.0,
 ) -> DialogueEngine:
     if card is None:
         card = load_character_card(CHARACTER_CONFIG_DIR)  # 默认用真实角色卡
@@ -90,10 +84,6 @@ def build_engine(
         segment_max=segment_max,
         idle_timeout=idle_timeout,
         inject_top_k=inject_top_k,
-        tool_registry=tool_registry,
-        tool_rounds=tool_rounds,
-        tool_call_timeout=tool_call_timeout,
-        tool_overall_timeout=tool_overall_timeout,
     )
 
 
@@ -277,7 +267,7 @@ async def test_memory_injection_top_k(tmp_path):
     for i in range(1, 11):
         await db.save_memory("default", "fact", f"key{i}", f"value{i}", importance=i, confirmed=0)
     engine = build_engine(long_term=db, inject_top_k=3)
-    messages = await engine._build_messages("你好", "s1")
+    messages = await engine.build_messages("你好", "s1")
     system = messages[0]["content"]
     assert "关于用户你已知的信息" in system
     assert "value10" in system and "value9" in system and "value8" in system
@@ -291,7 +281,7 @@ async def test_memory_injection_confirmed_mark(tmp_path):
     db = LongTermMemory(str(tmp_path / "m.db"))
     await db.save_memory("default", "profile", "user_name", "小林", importance=8, confirmed=1)
     engine = build_engine(long_term=db)
-    messages = await engine._build_messages("你好", "s1")
+    messages = await engine.build_messages("你好", "s1")
     system = messages[0]["content"]
     assert "小林（profile/user_name，已确认" in system  # 条目本身标注已确认
     assert "小林（profile/user_name，推测" not in system
@@ -407,49 +397,46 @@ def test_engine_init_emotion_from_card():
     engine = build_engine(card=card)
     assert engine.init_emotion == "greet"
 
-# ================================================================ 第三阶段：工具循环（ToolLoop）委托
+# ================================================================ R2：工具职责已迁出 DialogueEngine
 
 
 @pytest.mark.asyncio
-async def test_chat_stream_uses_tool_loop_when_registry_present():
-    """注册表存在时：对话走 ToolLoop（chat 调用），最终文本经情绪解析按既有协议输出。"""
-    registry = ToolRegistry()
-    registry.register(build_now_tool())
-    engine = build_engine(reply="[情绪:happy]我查一下时间~", tool_registry=registry)
-    full = ""
-    async for chunk in engine.chat_stream("现在几点了", "s1"):
-        full += chunk
-    assert full.startswith("[[EMOTION:happy]]")
-    assert "我查一下时间~" in full
-    assert engine.llm.chat_calls  # 走了 chat（ToolLoop）
-    history = engine.memory.get_history("s1")
-    assert history[-1]["content"] == "我查一下时间~"
+async def test_engine_no_longer_holds_tool_dependencies():
+    """R2 迁移正确性：DialogueEngine 不再持有 ToolLoop / ToolRegistry / ToolRuntime。"""
+    engine = build_engine()
+    assert not hasattr(engine, "_tool_loop")
+    assert not hasattr(engine, "tool_registry")
+    assert not hasattr(engine, "_tool_runtime")
 
 
 @pytest.mark.asyncio
-async def test_chat_stream_falls_back_without_tools():
-    """无注册表时：行为与现有一致（Stream），不调用 chat。"""
+async def test_chat_stream_always_uses_stream_path():
+    """工具职责迁出后：chat_stream 恒走 LLM stream，不再调用 chat（ToolLoop 已不在引擎内）。"""
     engine = build_engine(reply="[情绪:happy]你好呀~")
     full = ""
     async for chunk in engine.chat_stream("你好", "s1"):
         full += chunk
     assert full.startswith("[[EMOTION:happy]]")
-    assert not engine.llm.chat_calls
+    assert "你好呀~" in full
+    assert engine.llm.calls  # stream 被调用
+    assert not engine.llm.chat_calls  # chat 不再被调用
+    history = engine.memory.get_history("s1")
+    assert history and history[-1]["role"] == "assistant"
 
 
 @pytest.mark.asyncio
-async def test_build_system_prompt_injects_time_context_when_tools_enabled():
-    """规格 §8：工具可用时 system prompt 必带当前时间上下文。"""
-    registry = ToolRegistry()
-    registry.register(build_now_tool())
-    engine = build_engine(tool_registry=registry)
-    prompt = await engine._build_system_prompt("s1")
-    assert "[当前时间]" in prompt
-    assert "当前时间:" in prompt and "+" in prompt  # ISO 8601 带偏移
+async def test_prepare_turn_side_effects():
+    """R2：prepare_turn 收敛一轮请求的前奏（气氛值更新 / 用户消息落库）。"""
+    engine = build_engine()
+    await engine.prepare_turn("我今天很开心", "s1")
+    history = engine.memory.get_history("s1")
+    assert history and history[-1]["role"] == "user"
+    assert history[-1]["content"] == "我今天很开心"
 
 
 @pytest.mark.asyncio
-async def test_build_system_prompt_no_time_without_tools():
+async def test_build_system_prompt_has_no_time_context():
+    """R2：时间注入已迁入 ToolService，引擎不再注入时间上下文。"""
     engine = build_engine()
     prompt = await engine._build_system_prompt("s1")
     assert "当前时间:" not in prompt

@@ -17,16 +17,12 @@ import time
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from src.core.agent.mood import MoodSystem
-from src.core.agent.tool_loop import ToolLoop
 from src.core.agent.triggers import InitiativeTriggerMatcher
 from src.core.character.card import CharacterCard, InitiativeTrigger
 from src.core.llm.client import LLMClient
 from src.core.llm.prompt_builder import build_system_prompt
 from src.core.memory.long_term import LongTermMemory
 from src.core.memory.short_term import ShortTermMemory
-from src.core.tools.registry import ToolRegistry
-from src.core.tools.runtime import ToolRuntime
-from src.core.tools.time_context import current_time_context
 from src.utils.logger import logger
 
 # 流式响应中情绪标记的前缀（前端据此切换立绘；非角色个性化，保持模块级）
@@ -119,11 +115,6 @@ class DialogueEngine:
         forget_decay: int = 2,
         instant_enabled: bool = True,
         instant_keywords: Optional[List[str]] = None,
-        tool_registry: Optional[ToolRegistry] = None,
-        tool_runtime: Optional[ToolRuntime] = None,
-        tool_rounds: int = 4,
-        tool_call_timeout: float = 30.0,
-        tool_overall_timeout: float = 120.0,
     ):
         self.llm = llm_client
         self.memory = memory
@@ -165,20 +156,6 @@ class DialogueEngine:
         self._last_forget_run = 0.0
         self._instant_tasks: List[asyncio.Task[None]] = []
 
-        # 第三阶段：工具引擎（ToolLoop 运行时，规格 §5）
-        # 注册表为空/全部 disabled 时 _tool_loop 仍可构造，但 run() 返回 None 走普通对话
-        self.tool_registry = tool_registry
-        self._tool_runtime = tool_runtime
-        self._tool_loop: Optional[ToolLoop] = None
-        if tool_registry is not None:
-            self._tool_loop = ToolLoop(
-                llm_client=llm_client,
-                registry=tool_registry,
-                max_rounds=tool_rounds,
-                call_timeout=tool_call_timeout,
-                overall_timeout=tool_overall_timeout,
-            )
-
     async def chat_stream(self, user_input: str, session_id: str = "default") -> AsyncGenerator[str, None]:
         """处理一轮对话，流式产出回复文本。
 
@@ -189,17 +166,11 @@ class DialogueEngine:
         事件已与引擎解耦，主动说话由触发器承担：气氛值更新后先做流水线内
         触发器检查，命中则以引导式回复取代普通回复（第一步，[[EMOTION: 前缀标记）。
         """
-        # 0. 惰性总结检查：空闲超时/条数达标则后台总结上一段（不阻塞本次响应）
-        await self._check_summarize(session_id)
-
-        # 1. 更新气氛值
-        self.mood.update(user_input)
+        # 0~2：前奏（惰性总结 / 气氛值 / 用户消息落库 / 即时抽取）
+        await self.prepare_turn(user_input, session_id)
 
         # 2. 流水线内主动触发器检查（改动四·第一步）：仅"可接管回复"类触发器才取代普通回复
         trigger = self._match_initiative_trigger(session_id)
-        await self.memory_add(session_id, "user", user_input)
-        # 2.5 关键字触发的即时抽取（方案 B）：命中则后台异步落库，不阻塞本次回复
-        self._maybe_instant_extract(session_id, user_input)
         if trigger is not None and trigger.interrupt_reply:
             async for chunk in self._generate_with_initiative(trigger, session_id):
                 yield chunk
@@ -212,6 +183,17 @@ class DialogueEngine:
         # 4. 普通对话流式生成
         async for chunk in self._generate_reply(user_input, session_id):
             yield chunk
+
+    async def prepare_turn(self, user_input: str, session_id: str = "default") -> None:
+        """一轮请求的前奏：惰性总结 + 气氛值更新 + 用户消息落库 + 即时抽取。
+
+        R2 起由对话服务（DialogueService）在对话/工具两条路径统一调用，
+        保证工具路径与普通对话对气氛/记忆的影响一致。
+        """
+        await self._check_summarize(session_id)
+        self.mood.update(user_input)
+        await self.memory_add(session_id, "user", user_input)
+        self._maybe_instant_extract(session_id, user_input)
 
     # ---------------------------------------------------------------- 主动触发器
 
@@ -278,24 +260,12 @@ class DialogueEngine:
     # ---------------------------------------------------------------- 普通对话
 
     async def _generate_reply(self, user_input: str, session_id: str) -> AsyncGenerator[str, None]:
-        """生成普通回复，解析情绪标签并流式输出。
+        """普通对话流式生成：解析情绪标签并输出（工具职责已迁出，R2）。
 
-        工具引擎可用时先走 ToolLoop（带 tools 的模型请求循环，规格 §5）：
-        - 模型请求工具 → 注册表执行 → role:"tool" 结果回填 → 重试，直至输出最终文本
-        - 无可用工具 / 循环降级返回 None → 回退到原有流式路径（行为与现有一致）
-        情绪解析始终在最终文本之后执行，[[EMOTION:xx]] 协议与伪流式结构不变。
+        工具任务由 Orchestrator → ToolService 处理；本路径保持纯 LLM 流式，
+        [[EMOTION:xx]] 协议与伪流式结构不变（对外兼容，R3/R4 另行迁移真流式/UIEvent）。
         """
-        await self._sync_tools()
-        messages = await self._build_messages(user_input or "", session_id)
-        final = await self._try_tool_loop(messages)
-        if final is not None:
-            emotion, body = self._parse_response(final)
-            if body.strip():
-                yield f"{EMOTION_MARK_PREFIX}{emotion}]]"
-                yield body
-                await self.memory_add(session_id, "assistant", body)
-                return
-
+        messages = await self.build_messages(user_input or "", session_id)
         full_response = ""
         async for chunk in self.llm.stream(messages):
             full_response += chunk
@@ -306,23 +276,9 @@ class DialogueEngine:
 
         await self.memory_add(session_id, "assistant", body)
 
-    async def _sync_tools(self) -> None:
-        """首次对话前同步工具来源（懒连接；失败仅禁用来源，不阻塞对话）。"""
-        if self._tool_runtime is not None:
-            try:
-                await self._tool_runtime.sync()
-            except Exception as exc:  # noqa: BLE001 - 来源同步异常不得带崩对话
-                logger.warning("工具来源同步异常，继续普通对话 err={}", exc)
-
-    async def _try_tool_loop(self, messages: List[Dict[str, str]]) -> Optional[str]:
-        """工具循环入口：返回最终文本；无工具/异常降级返回 None（走普通对话）。"""
-        if self._tool_loop is None:
-            return None
-        try:
-            return await self._tool_loop.run(messages)
-        except Exception as exc:  # noqa: BLE001 - 工具循环异常不得带崩对话，降级普通对话
-            logger.warning("工具循环异常，降级普通对话 err={}", exc)
-            return None
+    def parse_response(self, text: str) -> tuple[str, str]:
+        """公开的情绪解析入口（R2 起供 DialogueService 呈现工具结果使用）。"""
+        return self._parse_response(text)
 
     def _parse_response(self, text: str) -> tuple[str, str]:
         """解析完整回复，返回 (情绪标签, 剥离标签后的正文)。
@@ -605,7 +561,8 @@ class DialogueEngine:
 
     # ---------------------------------------------------------------- Prompt 组装
 
-    async def _build_messages(self, user_input: str, session_id: str) -> List[Dict[str, str]]:
+    async def build_messages(self, user_input: str, session_id: str) -> List[Dict[str, str]]:
+        """构建一轮模型请求消息（R2 起供 DialogueService/ToolService 使用）。"""
         messages: List[Dict[str, str]] = [{"role": "system", "content": await self._build_system_prompt(session_id)}]
         history = self.memory.get_history(session_id)
         messages.extend(history[-self.memory.max_history :])
@@ -615,13 +572,9 @@ class DialogueEngine:
     async def _build_system_prompt(self, session_id: str) -> str:
         """组装 system prompt：人设 + 气氛值 + 记忆上下文 + 工具时间注入（最小侵入）。"""
         memory_context = await self._build_memory_context(session_id)
-        prompt = build_system_prompt(
+        return build_system_prompt(
             self.system_prompt, self.mood.mood, self.mood.get_label(), memory_context or None
         )
-        # 规格 §8：工具可用时，system prompt 必带当前日期/时间/周几/时区（每次组装动态生成）
-        if self.tool_registry is not None and self.tool_registry.has_enabled_tools():
-            prompt += f"\n\n[当前时间] {current_time_context()}"
-        return prompt
 
     async def _preheat(self) -> None:
         if self.corpus:
