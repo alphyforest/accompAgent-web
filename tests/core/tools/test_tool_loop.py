@@ -244,3 +244,62 @@ async def test_run_overall_timeout_degrades_to_none():
     loop = ToolLoop(llm_client=llm, registry=_registry(executed), overall_timeout=0.01)
     assert await loop.run([{"role": "user", "content": "hi"}]) is None
 
+
+
+
+async def test_run_uses_provided_tool_subset():
+    """R5：ToolLoop 只把传入的工具子集暴露给模型（ToolCatalog 筛选后）。"""
+    executed: List[Dict[str, Any]] = []
+    registry = _registry(executed)
+    extra = ToolSpec(
+        name="other_tool",
+        description="另一个工具。",
+        input_schema={"type": "object"},
+        executable=_echo_spec(executed).executable,
+    )
+    echo_spec = _echo_spec(executed)
+    llm = FakeToolLLM(
+        [
+            {"content": "", "tool_calls": [_tool_call("c1", echo_spec.name, {"value": "x"})]},
+            {"content": "完成了", "tool_calls": []},
+        ]
+    )
+    loop = ToolLoop(llm, registry)
+    final = await loop.run([{"role": "user", "content": "你好"}], tools=[echo_spec])
+    assert final == "完成了"
+    # 模型第一轮只看到 echo（另一个工具未暴露）
+    assert llm.tool_lists[0] is not None
+    names = [t["function"]["name"] for t in llm.tool_lists[0]]
+    assert names == ["echo"]
+    assert extra.name not in names
+    assert executed == [{"value": "x"}]
+
+
+
+async def test_run_propagates_cancellation():
+    """R5b：工具执行中取消任务 → CancelledError 向上传播（不被吞掉）。"""
+    started = asyncio.Event()
+
+    async def slow(args: Dict[str, Any]) -> Dict[str, Any]:
+        started.set()
+        await asyncio.sleep(60)
+        return {"ok": True}
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="slow_tool",
+            description="慢工具。",
+            input_schema={"type": "object"},
+            executable=slow,
+        )
+    )
+    llm = FakeToolLLM(
+        [{"content": "", "tool_calls": [_tool_call("c1", "slow_tool", {})]}]
+    )
+    loop = ToolLoop(llm, registry)
+    task = asyncio.create_task(loop.run([{"role": "user", "content": "你好"}]))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task

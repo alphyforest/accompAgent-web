@@ -161,3 +161,46 @@ async def test_now_tool_returns_iso8601_with_offset():
     assert "+" in result["now"] or result["now"].endswith("Z")  # 带时区偏移
     assert result.get("weekday") in {"星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"}
     assert result.get("utc_offset")  # 如 +0800
+
+
+
+def test_spec_v2_metadata_defaults():
+    """R5：ToolSpec v2 元数据安全默认值（SPEC-030 §3）。"""
+    spec = _spec("a")
+    assert spec.source_id == "unknown"
+    assert spec.capability == "generic"
+    assert spec.tags == []
+    assert spec.risk_level == "low"
+    assert spec.idempotency == "none"
+    assert spec.confirmation_policy == "never"
+    assert spec.timeout_seconds == 30.0
+
+
+def test_spec_v2_metadata_fields_and_validation():
+    """R5：元数据可设置；非法枚举/非正超时触发构造校验。"""
+    spec = ToolSpec(
+        name="a",
+        description="描述。",
+        input_schema={"type": "object"},
+        executable=_ok_execute,
+        source_id="agenda",
+        capability="calendar.write",
+        tags=["calendar"],
+        risk_level="high",
+        idempotency="natural",
+        confirmation_policy="conditional",
+        timeout_seconds=45.0,
+    )
+    assert spec.source_id == "agenda"
+    assert spec.capability == "calendar.write"
+    assert spec.confirmation_policy == "conditional"
+    with pytest.raises(ValueError):
+        ToolSpec(
+            name="x", description="描述", input_schema={}, executable=_ok_execute,
+            confirmation_policy="bogus",
+        )
+    with pytest.raises(ValueError):
+        ToolSpec(
+            name="x", description="描述", input_schema={}, executable=_ok_execute,
+            timeout_seconds=0,
+        )

@@ -28,19 +28,25 @@ class ToolRuntime:
         self.backup_data_path = backup_data_path
         self.backup_dir = backup_dir
         self._backup_checked = False
+        self._sync_lock = asyncio.Lock()
 
     async def sync(self) -> None:
-        """同步来源工具到注册表（懒连接触发点；失败仅禁用来源，不抛异常）。"""
-        if not self._backup_checked and self.backup_data_path and self.backup_dir:
-            self._backup_checked = True
-            try:
-                ensure_daily_backup(self.backup_data_path, self.backup_dir)
-            except Exception as exc:  # noqa: BLE001 - 备份失败不阻塞对话
-                logger.warning("agenda-data 每日备份失败 err={}", exc)
+        """同步来源工具到注册表（懒连接触发点；失败仅禁用来源，不抛异常）。
 
-        if not self.sources:
-            return
-        await asyncio.gather(*(self._sync_source(source) for source in self.sources))
+        R4 修复：并发请求同时进入 sync 会双 list_tools/双注册/重复告警——
+        整体持锁串行化，等待者在锁后看到 synced=True 直接跳过（缓存双保险）。
+        """
+        async with self._sync_lock:
+            if not self._backup_checked and self.backup_data_path and self.backup_dir:
+                self._backup_checked = True
+                try:
+                    ensure_daily_backup(self.backup_data_path, self.backup_dir)
+                except Exception as exc:  # noqa: BLE001 - 备份失败不阻塞对话
+                    logger.warning("agenda-data 每日备份失败 err={}", exc)
+
+            if not self.sources:
+                return
+            await asyncio.gather(*(self._sync_source(source) for source in self.sources))
 
     async def _sync_source(self, source: Any) -> None:
         """同步单个来源；连接/翻译失败 → 禁用该来源已有工具。
@@ -49,7 +55,10 @@ class ToolRuntime:
         每轮对话重复同步导致 schema 告警刷屏与无谓重复注册）；失败标记 failed 后
         本进程内不再重试。
         """
-        if source.failed or getattr(source, "synced", False):
+        if getattr(source, "synced", False):
+            return
+        # R5b：failed 来源进入退避窗口，窗口内不再每轮重试；到点后允许重连恢复
+        if source.failed and not source.can_retry():
             return
         try:
             tools = await source.list_tools()

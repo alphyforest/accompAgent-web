@@ -10,14 +10,17 @@
 import asyncio
 import os
 import re
-from contextlib import AsyncExitStack
+import subprocess
+import time
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
 
+from anyio.streams.text import TextReceiveStream
 from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp.types import JSONRPCMessage
 
-from src.core.tools.spec import ToolError, ToolSpec
+from src.core.tools.spec import GenericCapability, ToolError, ToolSpec
 from src.utils.logger import logger
 
 # schema 白名单（规格 §6）：只允许这些键直通；其余跳过并告警（禁止静默吞掉）
@@ -146,6 +149,89 @@ def _enrich_description(name: str, description: str) -> str:
     return " ".join(part for part in parts if part)
 
 
+@asynccontextmanager
+async def _stdio_client_capture_stderr(
+    params: StdioServerParameters,
+    source_name: str,
+) -> AsyncIterator[Tuple[Any, Any]]:
+    """stdio_client 替身：stderr 走管道并按行接入结构化日志（R5b，SPEC-030 §9）。
+
+    mcp 1.0.0 的 stdio_client 固定 stderr=sys.stderr（无法检索），这里镜像其
+    transport 语义（内存对象流 + stdin/stdout reader/writer），仅将 stderr 改为
+    逐行 loguru 输出并带 source_id；stdout 仍只走 JSON-RPC 协议。
+    """
+    import anyio
+
+    read_stream_writer: Any
+    read_stream: Any
+    write_stream: Any
+    write_stream_reader: Any
+    read_stream_writer, read_stream = anyio.create_memory_object_stream(0)
+    write_stream, write_stream_reader = anyio.create_memory_object_stream(0)
+
+    process = await anyio.open_process(
+        [params.command, *params.args],
+        env=params.env,
+        stderr=subprocess.PIPE,
+    )
+
+    async def stdout_reader() -> None:
+        assert process.stdout is not None
+        try:
+            async with read_stream_writer:
+                buffer = ""
+                async for chunk in TextReceiveStream(process.stdout):
+                    lines = (buffer + chunk).split("\n")
+                    buffer = lines.pop()
+                    for line in lines:
+                        try:
+                            message = JSONRPCMessage.model_validate_json(line)
+                        except Exception as exc:  # noqa: BLE001 - 非法协议行转异常帧
+                            await read_stream_writer.send(exc)
+                            continue
+                        await read_stream_writer.send(message)
+        except Exception as exc:  # noqa: BLE001 - 流关闭属正常
+            if not isinstance(exc, (anyio.ClosedResourceError, BrokenPipeError)):
+                logger.debug("mcp_source {} stdout reader 结束 err={}", source_name, exc)
+
+    async def stdin_writer() -> None:
+        assert process.stdin is not None
+        try:
+            async with write_stream_reader:
+                async for message in write_stream_reader:
+                    payload = message.model_dump_json(by_alias=True, exclude_none=True)
+                    await process.stdin.send((payload + "\n").encode())
+        except Exception as exc:  # noqa: BLE001
+            if not isinstance(exc, (anyio.ClosedResourceError, BrokenPipeError)):
+                logger.debug("mcp_source {} stdin writer 结束 err={}", source_name, exc)
+
+    async def stderr_reader() -> None:
+        if process.stderr is None:
+            return
+        buffer = ""
+        try:
+            async for chunk in TextReceiveStream(process.stderr):
+                buffer += chunk
+                lines = buffer.split("\n")
+                buffer = lines.pop()
+                for line in lines:
+                    stripped = line.strip()
+                    if stripped:
+                        # 结构化日志：带 source_id/stderr 标记，可在日志检索（PLAN-010 R5 验收）
+                        logger.info("mcp_source stderr source={} line={}", source_name, stripped)
+        except Exception as exc:  # noqa: BLE001 - 子进程退出后流关闭属正常
+            logger.debug("mcp_source {} stderr reader 结束 err={}", source_name, exc)
+
+    async with (
+        anyio.create_task_group() as tg,
+        process,
+    ):
+        tg.start_soon(stdout_reader)
+        tg.start_soon(stdin_writer)
+        tg.start_soon(stderr_reader)
+        yield read_stream, write_stream
+
+
 class McpToolSource:
     """MCP stdio 工具来源（懒连接、可 close、仅做协议翻译）。"""
 
@@ -158,7 +244,11 @@ class McpToolSource:
         name: str = "mcp",
         session_factory: Optional[Callable[[], Awaitable[Any]]] = None,
         connect_timeout: float = 15.0,
+        initialize_timeout: float = 10.0,
+        list_timeout: float = 30.0,
         call_timeout: float = 30.0,
+        close_timeout: float = 3.0,
+        backoff_seconds: float = 30.0,
         on_unavailable: Optional[Callable[[List[str]], None]] = None,
     ) -> None:
         self.command = command
@@ -169,56 +259,125 @@ class McpToolSource:
         self.name = name
         self._session_factory = session_factory
         self.connect_timeout = connect_timeout
+        self.initialize_timeout = initialize_timeout
+        self.list_timeout = list_timeout
         self.call_timeout = call_timeout
+        self.backoff_seconds = backoff_seconds
+        self._close_timeout = close_timeout
+        self._connect_lock = asyncio.Lock()
         self._on_unavailable = on_unavailable
         self._stack: Optional[AsyncExitStack] = None
         self._session: Optional[Any] = None
         self.failed = False
+        # R5b 来源状态机：uninitialized -> connecting -> ready / failed -> backoff -> connecting；ready/failed -> closed
+        self.state = "uninitialized"
+        self._retry_at = 0.0
         self.tool_names: List[str] = []
 
     async def start(self) -> None:
         """预留显式启动点；真实连接为懒加载（首次 list/call 触发）。"""
         self.failed = False
 
-    async def close(self) -> None:
-        """关闭连接并释放子进程（幂等；异常仅记录）。"""
-        if self._stack is not None:
-            try:
-                await self._stack.aclose()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("MCP 来源 {} 关闭异常 err={}", self.name, exc)
-        self._session = None
+    def can_retry(self) -> bool:
+        """退避判定（R5b）：closed 终态不可重连；failed 需过退避窗口。"""
+        if self.state == "closed":
+            return False
+        if not self.failed:
+            return True
+        return time.time() >= self._retry_at
+
+    async def _teardown(self) -> None:
+        """释放连接与子进程引用（不修改状态/失败标记）。
+
+        Ctrl+C 卡终端修复：子进程关闭加 wait_for 超时（close_timeout，默认 3s）。
+        """
+        stack = self._stack
         self._stack = None
+        self._session = None
+        if stack is not None:
+            try:
+                await asyncio.wait_for(stack.aclose(), timeout=self._close_timeout)
+            except Exception as exc:  # noqa: BLE001 - 关闭异常/超时仅记录，不阻塞应用退出
+                logger.warning("MCP 来源 {} 关闭异常/超时 err={}", self.name, exc)
+
+    async def close(self) -> None:
+        """关闭连接并释放子进程（幂等）；进入 closed 终态，不再重连。"""
+        await self._teardown()
         self.failed = True
+        self.state = "closed"
+
+    def _mark_failed(self) -> None:
+        """进入 failed 态：禁用快查 + 退避时间窗（R5b）。"""
+        self.failed = True
+        self.state = "failed"
+        self._retry_at = time.time() + self.backoff_seconds
 
     async def _ensure_connected(self) -> None:
-        """懒连接；失败标记 failed 并回落（不崩服务）。"""
-        if self.failed:
+        """懒连接；失败标记 failed 并退避（不崩服务）。
+
+        并发安全：连接建立全程持有 _connect_lock（双检），杜绝并发请求双启子进程
+        （R4 实测：SSE 前端快速连发时双 spawn）。
+        独立超时：connect 总预算 connect_timeout；initialize 独立 initialize_timeout。
+        退避：failed 未到 _retry_at 时快速失败；到点后允许重连（ToolRuntime 同步驱动）。
+        取消安全：连接/初始化被取消时不标记故障，清理半成品后向上传播。
+        """
+        if self.state == "closed":
+            raise ToolError(code="tool_source_unavailable", user_message="工具服务已关闭，请重启后重试")
+        if self.failed and not self.can_retry():
             raise ToolError(code="tool_source_unavailable", user_message="工具服务暂不可用，请稍后再试")
         if self._session is not None:
             return
-        try:
-            if self._session_factory is not None:
-                session = await self._session_factory()
-            else:
-                params = StdioServerParameters(command=self.command, args=self.args, env=self._env)
-                self._stack = AsyncExitStack()
-                transport = await self._stack.enter_async_context(stdio_client(params))
-                read, write = transport
-                session = await self._stack.enter_async_context(ClientSession(read, write))
-                await session.initialize()
-            self._session = session
-        except Exception as exc:  # noqa: BLE001 - 连接失败仅禁用来源，不崩服务
-            self.failed = True
-            await self.close()
-            logger.warning("MCP 来源 {} 连接失败 err={}", self.name, exc)
-            raise ToolError(code="tool_source_unavailable", user_message="工具服务暂不可用，请稍后再试") from exc
+        self.state = "connecting"
+        async with self._connect_lock:
+            if self._session is not None:
+                self.state = "ready"
+                return  # 等待者直接复用已建连接
+            try:
+                async with asyncio.timeout(self.connect_timeout):
+                    if self._session_factory is not None:
+                        session = await self._session_factory()
+                    else:
+                        params = StdioServerParameters(command=self.command, args=self.args, env=self._env)
+                        self._stack = AsyncExitStack()
+                        transport = await self._stack.enter_async_context(
+                            _stdio_client_capture_stderr(params, self.name)
+                        )
+                        read, write = transport
+                        session = await self._stack.enter_async_context(ClientSession(read, write))
+                    # initialize 独立超时（初始化卡死不占用整段连接预算）
+                    await asyncio.wait_for(session.initialize(), timeout=self.initialize_timeout)
+                self._session = session
+                self.failed = False
+                self.state = "ready"
+            except asyncio.CancelledError:
+                # 取消不标记来源故障：清理半成品连接后向上传播（供 ASGI 正常处理断开）
+                self.state = "uninitialized"
+                await self._teardown()
+                raise
+            except TimeoutError:
+                self._mark_failed()
+                await self._teardown()
+                logger.warning(
+                    "MCP 来源 {} 连接/初始化超时（connect={}s init={}s）",
+                    self.name,
+                    self.connect_timeout,
+                    self.initialize_timeout,
+                )
+                raise ToolError(code="tool_source_unavailable", user_message="工具服务连接超时，请稍后再试") from None
+            except Exception as exc:  # noqa: BLE001 - 连接失败仅禁用来源，不崩服务
+                self._mark_failed()
+                await self._teardown()
+                logger.warning("MCP 来源 {} 连接失败 err={}", self.name, exc)
+                raise ToolError(code="tool_source_unavailable", user_message="工具服务暂不可用，请稍后再试") from exc
 
     async def list_tools(self) -> List[Dict[str, Any]]:
-        """list_tools → 规整化工具信息（协议层）。"""
+        """list_tools → 规整化工具信息（协议层）；list 独立超时 list_timeout。"""
         await self._ensure_connected()
         assert self._session is not None
-        result = await asyncio.wait_for(self._session.list_tools(), timeout=self.connect_timeout)
+        try:
+            result = await asyncio.wait_for(self._session.list_tools(), timeout=self.list_timeout)
+        except TimeoutError:
+            raise ToolError(code="tool_timeout", user_message="工具列表获取超时，请稍后再试") from None
         tools: List[Dict[str, Any]] = []
         for tool in result.tools:
             tools.append({
@@ -238,12 +397,23 @@ class McpToolSource:
         async def execute(args: Dict[str, Any]) -> Dict[str, Any]:
             return await source.call_tool(name, args)
 
+        read_only = bool(info.get("read_only", False))
         return ToolSpec(
             name=name,
             description=_enrich_description(name, str(info.get("description") or "")),
             input_schema=info["input_schema"],
             executable=execute,
-            read_only=bool(info.get("read_only", False)),
+            read_only=read_only,
+            source_id=self.name,
+            # agenda 来源按读写分类为 calendar.*；其他来源安全默认 generic（本地策略覆盖）
+            capability=(
+                "calendar.read" if read_only else "calendar.write" if self.name == "agenda" else GenericCapability
+            ),
+            risk_level="low",
+            idempotency="natural" if not read_only else "none",
+            # ADR-004：agenda 自动执行；其余来源写工具默认需确认（不设全局自动执行）
+            confirmation_policy="never" if self.name == "agenda" else "conditional",
+            timeout_seconds=30.0,
         )
 
     async def call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -256,9 +426,9 @@ class McpToolSource:
                 self._session.call_tool(name, wire_arguments), timeout=self.call_timeout
             )
         except (EOFError, BrokenPipeError, ConnectionError, OSError) as exc:
-            # 进程级故障：标记不可用并禁用来源工具，后续调用快速失败
-            self.failed = True
-            await self.close()
+            # 进程级故障：标记 failed + 退避；禁用来源工具，后续调用快速失败
+            self._mark_failed()
+            await self._teardown()
             if self._on_unavailable is not None:
                 self._on_unavailable(self.tool_names)
             logger.warning("MCP 来源 {} 进程故障 name={} err={}", self.name, name, exc)

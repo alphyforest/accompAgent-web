@@ -10,6 +10,7 @@ from src.application.contracts import (
     ToolRequest,
 )
 from src.bootstrap.adapters import DialogueServiceAdapter, ToolServiceAdapter
+from src.core.agent.mood import MoodSystem
 from src.core.tools.registry import ToolRegistry
 from src.core.tools.spec import ToolSpec
 
@@ -25,6 +26,8 @@ class FakeEngine:
         self.prepared: List[tuple[str, str]] = []
         self.stored: List[tuple[str, str, str]] = []
         self.chunks = ["[[EMOTION:happy]]", "你好呀"]
+        self.init_emotion = "idle"
+        self.mood = MoodSystem()
 
     async def chat_stream(self, user_input: str, session_id: str) -> AsyncIterator[str]:
         for chunk in self.chunks:
@@ -50,9 +53,11 @@ class FakeToolLoop:
         self.final = final
         self.error = error
         self.runs: List[List[Dict[str, str]]] = []
+        self.ran_tools: List[list] = []
 
-    async def run(self, messages: List[Dict[str, str]]) -> Optional[str]:
+    async def run(self, messages: List[Dict[str, str]], tools: Optional[list] = None) -> Optional[str]:
         self.runs.append(messages)
+        self.ran_tools.append(tools or [])
         if self.error is not None:
             raise self.error
         return self.final
@@ -80,8 +85,12 @@ async def test_dialogue_reply_stream_passes_chunks():
     events = [
         e async for e in adapter.reply_stream(DialogueRequest(user_text="你好", session_id="s1", context=_ctx()))
     ]
-    assert [e.type for e in events] == ["message.started", "message.delta", "message.delta", "message.completed"]
-    assert [e.content for e in events if e.type == "message.delta"] == engine.chunks
+    delta_contents = [e.content for e in events if e.type == "message.delta"]
+    assert delta_contents == engine.chunks
+    assert [e.type for e in events][0] == "message.started"
+    assert any(e.type == "emotion.changed" for e in events)
+    assert any(e.type == "mood.changed" for e in events)
+    assert events[-1].type == "message.completed"
 
 
 async def test_dialogue_build_messages_prepares_turn():
@@ -131,6 +140,8 @@ async def test_tool_execute_completed_carries_final_text():
     assert events[-1].result.user_message == "[[情绪:happy]查到了"
     # 时间上下文注入到 system 消息（SPEC-030 §10，引擎不再注入）
     assert "[当前时间]" in loop.runs[0][0]["content"]
+    # R5：只把与请求能力匹配的工具暴露给模型
+    assert [spec.name for spec in loop.ran_tools[0]] == ["list_events"]
 
 
 async def test_tool_execute_failed_when_loop_returns_none():

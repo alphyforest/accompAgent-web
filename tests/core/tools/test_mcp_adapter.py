@@ -1,6 +1,8 @@
 """MCP stdio 适配器与工具运行时单元测试（Fake transport / Fake session，不 spawn 进程）。"""
 
+import asyncio
 import json
+import time
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -243,6 +245,85 @@ async def test_runtime_close_is_idempotent():
     assert source.failed is True
 
 
+@pytest.mark.asyncio
+async def test_source_close_timeout_returns_quickly():
+    """Ctrl+C 卡终端修复：子进程关闭挂起（SDK aclose 不返回）时，close 必须在超时内返回。"""
+    class _HangingStack:
+        """模拟卡死的 AsyncExitStack：aclose 永不返回。"""
+
+        async def aclose(self) -> None:
+            await asyncio.sleep(10)
+
+    source = McpToolSource(
+        "node", ["x"],
+        session_factory=_make_factory(FakeSession([_tool("a")])),
+        close_timeout=0.05,
+    )
+    source._stack = _HangingStack()  # 私有字段直写：单测模拟关闭挂起
+    source._session = object()
+    start = time.monotonic()
+    await source.close()
+    assert time.monotonic() - start < 1.0  # 未被 10s 挂起拖住
+    assert source.failed is True
+    assert source._stack is None and source._session is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sync_lists_tools_once(tmp_path):
+    """R4 修复：并发 sync 只 list_tools 一次（sync 锁 + synced 缓存双保险，无重复注册/告警）。"""
+    data_file = tmp_path / "agenda-data.json"
+    data_file.write_text(json.dumps({"events": []}), encoding="utf-8")
+    session = FakeSession(tools=[_tool("a", read_only=True)])
+    source = McpToolSource("node", ["x"], session_factory=_make_factory(session))
+    registry = ToolRegistry()
+    runtime = ToolRuntime(
+        registry, [source],
+        backup_data_path=str(data_file),
+        backup_dir=str(tmp_path / "bk"),
+    )
+    await asyncio.gather(runtime.sync(), runtime.sync())
+    assert session.list_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_ensure_connected_single_spawn():
+    """R4 修复：并发懒连接只启动一次子进程（连接锁），list 幂等可各自执行。"""
+    session = FakeSession(tools=[_tool("a")])
+    spawns: List[int] = []
+
+    async def counting_factory() -> FakeSession:
+        spawns.append(1)
+        return session
+
+    source = McpToolSource("node", ["x"], session_factory=counting_factory)
+    await asyncio.gather(source.list_tools(), source.list_tools())
+    assert len(spawns) == 1  # 子进程/连接只建一次
+    assert session.list_calls == 2  # list 幂等，两个调用各自执行
+
+
+@pytest.mark.asyncio
+async def test_ensure_connected_cancel_cleans_up_without_failed():
+    """R4 修复：连接初始化中取消（SSE 断连）→ 清理半成品、不标记来源故障、取消向上传播。"""
+    class BlockingSession:
+        async def initialize(self) -> None:
+            await asyncio.sleep(30)
+
+        async def list_tools(self) -> ListToolsResult:
+            return ListToolsResult(tools=[])
+
+    async def blocking_factory() -> BlockingSession:
+        return BlockingSession()
+
+    source = McpToolSource("node", ["x"], session_factory=blocking_factory, close_timeout=0.05)
+    task = asyncio.create_task(source.list_tools())
+    await asyncio.sleep(0.05)  # 让 initialize 进入挂起
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert source.failed is False  # 取消不是来源故障
+    assert source._session is None and source._stack is None  # 半成品已清理
+
+
 def test_ensure_daily_backup_once(tmp_path):
     data_file = tmp_path / "agenda-data.json"
     data_file.write_text("{}", encoding="utf-8")
@@ -310,3 +391,159 @@ def test_normalize_datetime_arguments_wire_format():
     assert out["tags"][1] == "2026-08-29T02:00:00Z"
     assert out["nested"]["when"] == "2026-08-28T17:00:00Z"  # 01:00+08:00 = 前一天 17:00Z
 
+
+
+
+# ================================================================ R5b：SourceManager 加固（锁/超时/退避/取消/重试）
+
+
+class SlowSession(FakeSession):
+    """FakeSession 的慢速变体：initialize/list/call 可注入延迟。"""
+
+    def __init__(
+        self,
+        tools: Optional[List[Tool]] = None,
+        initialize_delay: float = 0.0,
+        list_delay: float = 0.0,
+        call_delay: float = 0.0,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(tools=tools or [], **kwargs)
+        self.initialize_delay = initialize_delay
+        self.list_delay = list_delay
+        self.call_delay = call_delay
+
+    async def initialize(self) -> None:
+        if self.initialize_delay:
+            await asyncio.sleep(self.initialize_delay)
+
+    async def list_tools(self) -> ListToolsResult:
+        if self.list_delay:
+            await asyncio.sleep(self.list_delay)
+        return await super().list_tools()
+
+    async def call_tool(self, name: str, arguments: Dict[str, Any]) -> CallToolResult:
+        if self.call_delay:
+            await asyncio.sleep(self.call_delay)
+        return await super().call_tool(name, arguments)
+
+
+def _counting_factory(session: FakeSession, counter: List[int]) -> Any:
+    async def factory() -> FakeSession:
+        counter[0] += 1
+        return session
+
+    return factory
+
+
+@pytest.mark.asyncio
+async def test_concurrent_list_tools_connects_once():
+    """验收：并发首次调用只启动一个 MCP 进程（锁 + 双检）。"""
+    counter: List[int] = [0]
+    session = SlowSession(tools=[_tool("a")], initialize_delay=0.05)
+    source = McpToolSource("node", ["x"], session_factory=_counting_factory(session, counter))
+    results = await asyncio.gather(source.list_tools(), source.list_tools())
+    assert counter[0] == 1
+    assert len(results) == 2
+    assert source.state == "ready"
+
+
+@pytest.mark.asyncio
+async def test_initialize_timeout_independent_of_connect():
+    """验收：initialize 卡死可独立超时（不占用整段连接预算）。"""
+    session = SlowSession(tools=[_tool("a")], initialize_delay=0.3)
+    source = McpToolSource(
+        "node", ["x"], session_factory=_make_factory(session),
+        connect_timeout=10.0, initialize_timeout=0.05,
+    )
+    with pytest.raises(ToolError) as excinfo:
+        await source.list_tools()
+    assert excinfo.value.code == "tool_source_unavailable"
+    assert source.failed is True
+    assert source.state == "failed"
+
+
+@pytest.mark.asyncio
+async def test_connect_timeout_when_factory_hangs():
+    async def factory() -> FakeSession:
+        await asyncio.sleep(5)
+        return FakeSession(tools=[])
+
+    source = McpToolSource("node", ["x"], session_factory=factory, connect_timeout=0.05)
+    with pytest.raises(ToolError) as excinfo:
+        await source.list_tools()
+    assert excinfo.value.code == "tool_source_unavailable"
+    assert source.failed is True
+    assert source.can_retry() is False
+
+
+@pytest.mark.asyncio
+async def test_backoff_blocks_immediate_retry_then_allows():
+    attempts: List[int] = [0]
+
+    async def factory() -> FakeSession:
+        attempts[0] += 1
+        if attempts[0] == 1:
+            raise OSError("spawn failed")
+        return FakeSession(tools=[_tool("ok")])
+
+    source = McpToolSource("node", ["x"], session_factory=factory)
+    with pytest.raises(ToolError):
+        await source.list_tools()
+    assert source.state == "failed"
+    assert source.can_retry() is False  # 退避窗口内禁止立即重试（不刷屏）
+    source._retry_at = 0  # 越过退避窗口
+    infos = await source.list_tools()
+    assert [info["name"] for info in infos] == ["ok"]
+    assert source.failed is False
+    assert source.state == "ready"
+
+
+@pytest.mark.asyncio
+async def test_list_tools_timeout_raises_tool_timeout():
+    session = SlowSession(tools=[_tool("a")], list_delay=0.2)
+    source = McpToolSource("node", ["x"], session_factory=_make_factory(session), list_timeout=0.05)
+    with pytest.raises(ToolError) as excinfo:
+        await source.list_tools()
+    assert excinfo.value.code == "tool_timeout"
+
+
+@pytest.mark.asyncio
+async def test_call_cancelled_does_not_mark_failed():
+    """取消传播：执行中取消不把来源标记为故障（SPEC-050 §10 断线语义）。"""
+    session = SlowSession(tools=[_tool("a")], call_delay=60.0)
+    source = McpToolSource("node", ["x"], session_factory=_make_factory(session))
+    task = asyncio.create_task(source.call_tool("a", {}))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert source.failed is False
+    assert source.state == "ready"
+
+
+@pytest.mark.asyncio
+async def test_runtime_retries_failed_source_after_backoff():
+    """验收：来源失败不会每轮重试刷屏；退避窗口过后可自动恢复。"""
+    attempts: List[int] = [0]
+
+    async def factory() -> FakeSession:
+        attempts[0] += 1
+        if attempts[0] == 1:
+            raise OSError("spawn failed")
+        return FakeSession(tools=[_tool("a")])
+
+    source = McpToolSource("node", ["x"], session_factory=factory)
+    registry = ToolRegistry()
+    runtime = ToolRuntime(registry, [source])
+    await runtime.sync()
+    assert source.failed is True
+    assert registry.list() == []
+    # 窗口内再同步：不触发重连
+    await runtime.sync()
+    assert attempts[0] == 1
+    source._retry_at = 0  # 越过退避窗口
+    await runtime.sync()
+    assert [spec.name for spec in registry.list()] == ["a"]
+    assert source.failed is False
+    assert getattr(source, "synced", False) is True

@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src.core.llm.client import LLMClient
 from src.core.tools.registry import ToolRegistry
-from src.core.tools.spec import ToolError
+from src.core.tools.spec import ToolError, ToolSpec
 from src.utils.logger import logger
 
 # 默认参数（规格 §5 / settings 可覆盖）
@@ -51,14 +51,22 @@ class ToolLoop:
         self.max_rounds = max_rounds
         self.call_timeout = call_timeout
         self.overall_timeout = overall_timeout
+        self._tools_override: Optional[List[ToolSpec]] = None
 
-    async def run(self, base_messages: List[Dict[str, str]]) -> Optional[str]:
+    async def run(
+        self,
+        base_messages: List[Dict[str, str]],
+        tools: Optional[List[ToolSpec]] = None,
+    ) -> Optional[str]:
         """执行工具循环，返回模型最终文本。
 
-        无可用工具或 LLM/整体异常时返回 None，调用方据此降级为普通对话。
+        tools 为请求级工具子集（R5：ToolCatalog 按 capability 筛选后的快照）；
+        缺省时使用注册表全部可用工具。无可用工具或 LLM/整体异常时返回 None，
+        调用方据此降级为普通对话。
         """
-        if not self.registry.has_enabled_tools():
+        if tools is None and not self.registry.has_enabled_tools():
             return None
+        self._tools_override = tools
 
         messages: List[Dict[str, Any]] = [dict(m) for m in base_messages]
         seen: Set[Tuple[str, str]] = set()
@@ -83,10 +91,14 @@ class ToolLoop:
                         return final.get("content") or None
         except TimeoutError:
             logger.warning("ToolLoop 整体超时（{}s），降级普通对话", self.overall_timeout)
+            self._tools_override = None
             return None
         except Exception as exc:  # noqa: BLE001 - 任何异常不得带崩对话
             logger.warning("ToolLoop 失败，降级普通对话 err={}", exc)
+            self._tools_override = None
             return None
+        finally:
+            self._tools_override = None
 
     async def _request(
         self,
@@ -96,7 +108,12 @@ class ToolLoop:
         """发起一次模型请求；include_tools=False 时不携带 tools（用于轮数上限收尾）。"""
         tools: Optional[List[Dict[str, Any]]] = None
         if include_tools:
-            tools = [spec.to_openai_schema() for spec in self.registry.list() if not spec.disabled]
+            specs = (
+                self._tools_override
+                if self._tools_override is not None
+                else [spec for spec in self.registry.list() if not spec.disabled]
+            )
+            tools = [spec.to_openai_schema() for spec in specs]
         return await self.llm.chat(messages, tools=tools, tool_choice="auto")
 
     def _assistant_tool_call_message(

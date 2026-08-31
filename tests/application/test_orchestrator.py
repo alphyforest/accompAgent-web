@@ -200,13 +200,14 @@ async def test_deadline_exceeded_emits_error():
     orch = ConversationOrchestrator(CapabilityRouter(), slow, FakeToolService(matched=False))
     events = await _collect(orch, _ctx(deadline_ms=20), "你好", CapabilitySnapshot())
     types = [e.type for e in events]
-    assert types[-1] == "request.error"
-    assert events[-1].payload["code"] == "deadline_exceeded"
+    assert types[-1] == "request.failed"
+    assert events[-1].payload["error_code"] == "deadline_exceeded"
     assert "request.completed" not in types
 
 
 async def test_contracts_serialize_json_round_trip():
     import json
+    from datetime import UTC, datetime
 
     ctx = _ctx(deadline_ms=100)
     encoded = ctx.model_dump_json()
@@ -216,5 +217,30 @@ async def test_contracts_serialize_json_round_trip():
     result = ToolExecutionResult(tool_name="calendar.create", data={"ok": True}, side_effects=["created:1"])
     assert json.loads(result.model_dump_json())["status"] == "success"
 
-    event = UIEvent(type="message.completed", request_id="req-1", trace_id="trace-1", payload={"content": "hi"})
-    assert event.model_dump()["type"] == "message.completed"
+    event = UIEvent(
+        event_id="e1",
+        request_id="req-1",
+        trace_id="trace-1",
+        type="message.completed",
+        timestamp=datetime.now(UTC),
+        payload={"text": "hi"},
+    )
+    dumped = event.model_dump()
+    assert dumped["schema_version"] == "1.0"
+    assert dumped["type"] == "message.completed"
+    assert dumped["source"] == "orchestrator"
+    assert dumped["sequence"] == 1
+
+
+
+async def test_ui_event_envelope_sequence_and_source():
+    """R4：UIEvent 携带 SPEC-050 envelope，sequence 单 request 内单调递增。"""
+    orch = ConversationOrchestrator(CapabilityRouter(), FakeDialogueService(), FakeToolService(matched=False))
+    events = await _collect(orch, _ctx(), "你好", CapabilitySnapshot())
+    assert [e.sequence for e in events] == list(range(1, len(events) + 1))
+    for event in events:
+        assert event.schema_version == "1.0"
+        assert event.event_id
+        assert event.timestamp is not None
+    assert events[0].source == "orchestrator"
+    assert events[2].source == "dialogue"

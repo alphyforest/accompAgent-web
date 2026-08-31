@@ -124,11 +124,11 @@ python run.py stop
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `POST` | `/api/chat/stream` | 流式对话（SSE） |
+| `POST` | `/api/chat/stream` | 对话：`Accept: text/event-stream` → UIEvent v1 SSE；其他 → legacy 文本 |
 | `GET`  | `/api/mood` | 查询当前气氛值 |
 | `GET`  | `/api/status` | 查询服务状态（气氛值/活跃链/冷却） |
 | `GET`  | `/api/character` | 下发角色卡（立绘映射/默认情绪） |
-| `GET`  | `/api/initiative` | 取出积压的主动发言（轮询） |
+| `GET`  | `/api/initiative` | 取出积压的主动发言（轮询，响应为 UIEvent 数组） |
 | `POST` | `/api/reset` | 三档清除并复位：`{"level": "session"\|"history"\|"all"}`（缺省 session） |
 | `POST` | `/api/event/trigger` | 按节点 id 强制触发事件（调试口） |
 | `GET`  | `/api/memory` | 列出全部长期记忆（按 category 分组） |

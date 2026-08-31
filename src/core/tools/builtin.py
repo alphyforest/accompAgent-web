@@ -35,4 +35,8 @@ def build_now_tool() -> ToolSpec:
         input_schema={"type": "object", "properties": {}},
         executable=_now_execute,
         read_only=True,
+        source_id="builtin",
+        capability="time.read",
+        tags=["time"],
+        risk_level="low",
     )

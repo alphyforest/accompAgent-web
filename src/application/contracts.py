@@ -5,6 +5,7 @@
 - Port 签名与 SPEC-010 §4 对齐；R1 阶段端口由 Fake 实现测试，API 切换在后续小阶段完成
 """
 
+from datetime import datetime
 from typing import AsyncIterator, Dict, List, Literal, Optional, Protocol
 
 from pydantic import BaseModel, Field
@@ -62,6 +63,7 @@ class ToolExecutionResult(BaseModel):
     side_effects: List[str] = Field(default_factory=list)
     user_message: str = ""
     error_code: Optional[str] = None
+    duration_ms: int = 0
 
 
 class EntertainmentSession(BaseModel):
@@ -89,12 +91,28 @@ class CapabilityError(BaseModel):
 
 
 class UIEvent(BaseModel):
-    """最小 UI 事件（R1 骨架；R4 按 SPEC-050 扩展）。"""
+    """统一 UI 事件（SPEC-050 v1.0 Envelope）。
 
-    type: str
+    - sequence 在单 request 内从 1 单调递增；客户端不得假定跨 request 全局有序
+    - 每个 request 只能有一个终态：completed / cancelled / failed
+    """
+
+    schema_version: Literal["1.0"] = "1.0"
+    event_id: str
     request_id: str
     trace_id: str
     session_id: str = "default"
+    type: str
+    source: Literal[
+        "orchestrator",
+        "dialogue",
+        "tool",
+        "entertainment",
+        "initiative",
+        "system",
+    ] = "orchestrator"
+    timestamp: datetime
+    sequence: int = 1
     payload: Dict[str, object] = Field(default_factory=dict)
 
 
@@ -153,11 +171,15 @@ class ToolModelPort(Protocol):
 
 
 class DialogueEvent(BaseModel):
-    """对话模块事件（R1 骨架：message.*；R4 扩展 emotion.changed 等）。"""
+    """对话模块事件（SPEC-050 §5）：message.* / emotion.changed / mood.changed。
+
+    payload 可携带结构化字段（如 message_source、emotion/portrait_id、mood value/label）。
+    """
 
     type: str
     content: str = ""
     emotion: Optional[str] = None
+    payload: Dict[str, object] = Field(default_factory=dict)
 
 
 class DialogueRequest(BaseModel):

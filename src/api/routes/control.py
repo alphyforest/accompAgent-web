@@ -1,6 +1,8 @@
 """状态查询、重置与记忆管理路由（PLAN-010 R1：控制面全部经应用层 Application Service）。"""
 
+from datetime import UTC, datetime
 from typing import Dict, List
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -25,7 +27,7 @@ from src.api.schemas import (
     StatusResponse,
     SummaryItem,
 )
-from src.application.contracts import MemoryItemView, SummaryView
+from src.application.contracts import MemoryItemView, SummaryView, UIEvent
 from src.application.control_service import MemoryApplicationService, ResetApplicationService
 from src.application.query_service import CharacterQueryService, InitiativeQueryService
 from src.core.agent.event import EventSystem
@@ -80,10 +82,35 @@ async def get_character(service: CharacterQueryService = Depends(get_character_q
     )
 
 
-@router.get("/initiative")
-async def get_initiative(service: InitiativeQueryService = Depends(get_initiative_query_service)) -> List[str]:
-    """取出积压的主动发言（前端轮询展示；应用层查询服务）。"""
-    return await service.collect()
+@router.get("/initiative", response_model=List[UIEvent])
+async def get_initiative(service: InitiativeQueryService = Depends(get_initiative_query_service)) -> List[UIEvent]:
+    """取出积压的主动发言（R4：轮询响应转换为 UIEvent 数组，SPEC-050 §8）。
+
+    客户端用 event_id 去重；message_source=initiative。
+    """
+    rows = await service.collect()
+    now = datetime.now(UTC)
+    events: List[UIEvent] = []
+    for i, text in enumerate(rows, start=1):
+        events.append(
+            UIEvent(
+                event_id=uuid4().hex,
+                request_id="initiative",
+                trace_id="initiative",
+                session_id="default",
+                type="message.completed",
+                source="initiative",
+                timestamp=now,
+                sequence=i,
+                payload={
+                    "message_id": f"msg_init_{uuid4().hex[:8]}",
+                    "role": "assistant",
+                    "message_source": "initiative",
+                    "text": text,
+                },
+            )
+        )
+    return events
 
 
 @router.get("/memory", response_model=MemoryListResponse)

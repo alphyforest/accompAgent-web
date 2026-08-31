@@ -19,6 +19,8 @@ def start(reload: bool = typer.Option(False, help="是否启用热重载（开�
         host=settings.host,
         port=settings.port,
         reload=reload,
+        # Ctrl+C 卡终端修复：graceful shutdown 超时后强制退出（默认 None=无限等待 lifespan 关闭）
+        timeout_graceful_shutdown=8,
     )
 
 

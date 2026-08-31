@@ -10,6 +10,7 @@ R5 引入 ToolSpec capability 元数据后精确匹配。
 本模块属于 Composition Root 边界（bootstrap），允许直接依赖 core 实现。
 """
 
+import time
 from typing import AsyncIterator, Dict, List, Optional
 
 from src.application.contracts import (
@@ -23,9 +24,12 @@ from src.application.contracts import (
     ToolExecutionResult,
     ToolRequest,
 )
-from src.core.agent.dialogue import DialogueEngine
+from src.core.agent.dialogue import EMOTION_MARK_PREFIX, DialogueEngine
+from src.core.tools.catalog import ToolCatalog
+from src.core.tools.policy import ToolPolicy
 from src.core.tools.registry import ToolRegistry
 from src.core.tools.runtime import ToolRuntime
+from src.core.tools.spec import ToolSpec
 from src.core.tools.time_context import current_time_context
 from src.core.tools.tool_loop import ToolLoop
 from src.utils.logger import logger
@@ -43,37 +47,86 @@ class DialogueServiceAdapter:
         return await self._engine.build_messages(user_text, context.session_id)
 
     async def reply_stream(self, request: DialogueRequest) -> AsyncIterator[DialogueEvent]:
-        """普通对话：引擎 chunk 原样转成 message.delta 事件（对外协议不变）。"""
-        yield DialogueEvent(type="message.started")
+        """普通对话（R4 事件语义）：情绪标记帧 + 正文增量 + emotion/mood 独立事件。
+
+        message_source=reply；emotion_mark 帧供 legacy 文本协议重组，UIEvent 客户端跳过。
+        """
+        yield DialogueEvent(type="message.started", payload={"message_source": "reply"})
+        emotion: Optional[str] = None
+        body = ""
         async for chunk in self._engine.chat_stream(request.user_text, request.session_id):
-            yield DialogueEvent(type="message.delta", content=chunk)
-        yield DialogueEvent(type="message.completed")
+            if chunk.startswith(EMOTION_MARK_PREFIX) and chunk.endswith("]]") and emotion is None:
+                emotion = chunk[len(EMOTION_MARK_PREFIX) : -2]
+                yield DialogueEvent(
+                    type="message.delta",
+                    content=chunk,
+                    payload={"message_source": "reply", "emotion_mark": True},
+                )
+            else:
+                body += chunk
+                yield DialogueEvent(type="message.delta", content=chunk, payload={"message_source": "reply"})
+        if emotion is None:
+            emotion = self._engine.init_emotion
+        yield DialogueEvent(type="emotion.changed", payload={"emotion": emotion, "portrait_id": emotion})
+        yield DialogueEvent(
+            type="mood.changed",
+            payload={"value": self._engine.mood.mood, "label": self._engine.mood.get_label()},
+        )
+        yield DialogueEvent(
+            type="message.completed",
+            content=body,
+            emotion=emotion,
+            payload={"message_source": "reply"},
+        )
 
     async def present_result_stream(self, request: PresentationRequest) -> AsyncIterator[DialogueEvent]:
-        """工具结果呈现：按既有 [[EMOTION:..]] + 正文 协议输出并落库正文。"""
+        """工具结果呈现（R4 事件语义）：message_source=tool_presentation + 情绪独立事件。"""
         text = request.result.user_message
         if not text:
             return
         emotion, body = self._engine.parse_response(text)
-        yield DialogueEvent(type="message.started")
-        yield DialogueEvent(type="message.delta", content=f"[[EMOTION:{emotion}]]")
-        yield DialogueEvent(type="message.delta", content=body)
-        yield DialogueEvent(type="message.completed")
+        yield DialogueEvent(type="message.started", payload={"message_source": "tool_presentation"})
+        yield DialogueEvent(
+            type="message.delta",
+            content=f"{EMOTION_MARK_PREFIX}{emotion}]]",
+            payload={"message_source": "tool_presentation", "emotion_mark": True},
+        )
+        yield DialogueEvent(
+            type="message.delta",
+            content=body,
+            payload={"message_source": "tool_presentation"},
+        )
+        yield DialogueEvent(type="emotion.changed", payload={"emotion": emotion, "portrait_id": emotion})
+        yield DialogueEvent(
+            type="message.completed",
+            content=body,
+            emotion=emotion,
+            payload={"message_source": "tool_presentation"},
+        )
         await self._engine.memory_add(request.context.session_id, "assistant", body)
 
 
 class ToolServiceAdapter:
-    """ToolServicePort 实现：包装 ToolLoop / ToolRegistry / ToolRuntime（R2 v1）。"""
+    """ToolServicePort 实现：包装 ToolLoop / ToolCatalog / ToolPolicy（R5）。
+
+    - capability 子集选择：只把与请求能力相关的工具暴露给模型（SPEC-030 §4/§5）
+    - 执行前策略检查：Agenda 自动执行（ADR-004）；其余需确认写工具先发 confirmation_required
+    - 审计：执行时长/状态/错误码经结构化日志记录（带 source_id）
+    """
 
     def __init__(
         self,
         loop: ToolLoop,
         registry: ToolRegistry,
         runtime: Optional[ToolRuntime] = None,
+        catalog: Optional[ToolCatalog] = None,
+        policy: Optional[ToolPolicy] = None,
     ) -> None:
         self._loop = loop
         self._registry = registry
         self._runtime = runtime
+        self._catalog = catalog or ToolCatalog(registry)
+        self._policy = policy or ToolPolicy()
 
     async def sync(self) -> None:
         """同步工具来源（懒连接；失败仅降级，不抛）。"""
@@ -84,13 +137,26 @@ class ToolServiceAdapter:
         except Exception as exc:  # noqa: BLE001 - 来源同步失败不阻塞对话
             logger.warning("ToolService 来源同步失败 err={}", exc)
 
+    def _capability_tools(self, request: ToolRequest) -> List[ToolSpec]:
+        """按请求能力筛选工具子集（generic 兜底），返回 ToolSpec 列表。"""
+        caps = set(request.capabilities)
+        snapshot = self._catalog.snapshot()
+        if not caps:
+            return snapshot.all()
+        return [
+            spec
+            for spec in snapshot.all()
+            if spec.capability in caps or spec.capability == "generic"
+        ]
+
     async def can_handle(self, request: ToolRequest) -> CapabilityMatch:
-        names = [spec.name for spec in self._registry.list() if not spec.disabled]
-        matched = bool(request.capabilities) and bool(names)
-        return CapabilityMatch(matched=matched, tool_names=names if matched else [])
+        tools = self._capability_tools(request)
+        names = [spec.name for spec in tools]
+        return CapabilityMatch(matched=bool(names), tool_names=names)
 
     async def execute(self, request: ToolRequest) -> AsyncIterator[ToolEvent]:
-        names = [spec.name for spec in self._registry.list() if not spec.disabled]
+        tools = self._capability_tools(request)
+        names = [spec.name for spec in tools]
         batch = ",".join(names) if names else None
         if not request.messages:
             yield ToolEvent(
@@ -98,31 +164,73 @@ class ToolServiceAdapter:
                 error=CapabilityError(code="empty_context", user_message="工具上下文缺失，请重试"),
             )
             return
-        yield ToolEvent(type="tool.selected", tool_name=batch)
-        yield ToolEvent(type="tool.started", tool_name=batch)
-        try:
-            final = await self._loop.run(self._with_time_context(request.messages))
-        except Exception as exc:  # noqa: BLE001 - 工具循环异常归一化为失败事件
-            logger.warning("ToolService 工具循环异常 err={}", exc)
+        if not tools:
             yield ToolEvent(
                 type="tool.failed",
-                error=CapabilityError(code="tool_loop_error", user_message="工具处理失败，请稍后重试"),
+                error=CapabilityError(code="no_tool_matches", user_message="没有可用的工具执行本次请求"),
             )
             return
+
+        # 策略检查（SPEC-030 §6）：deny -> failed；require_confirmation -> confirmation_required
+        for spec in tools:
+            decision = self._policy.decide(spec)
+            if not decision.allow:
+                yield ToolEvent(
+                    type="tool.failed",
+                    tool_name=spec.name,
+                    error=CapabilityError(code="tool_disabled", user_message=f"工具 {spec.name} 当前不可用"),
+                )
+                return
+            if decision.require_confirmation:
+                yield ToolEvent(
+                    type="tool.confirmation_required",
+                    tool_name=spec.name,
+                    error=CapabilityError(
+                        code="confirmation_required",
+                        user_message=f"工具 {spec.name} 需要用户确认后才能执行",
+                    ),
+                )
+                return
+
+        yield ToolEvent(type="tool.selected", tool_name=batch)
+        yield ToolEvent(type="tool.started", tool_name=batch)
+        start = time.perf_counter()
+        error_code: Optional[str] = None
+        try:
+            final = await self._loop.run(self._with_time_context(request.messages), tools=tools)
+        except Exception as exc:  # noqa: BLE001 - 工具循环异常归一化为失败事件
+            error_code = "tool_loop_error"
+            logger.warning("ToolService 工具循环异常 err={}", exc)
+            final = None
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            "tool_exec source={} tools={} status={} duration_ms={} error_code={}",
+            ",".join(sorted({spec.source_id for spec in tools})) or "?",
+            batch,
+            "success" if final is not None and error_code is None else "failed",
+            duration_ms,
+            error_code or "",
+        )
         if final is None:
+            key = "tool_unavailable" if error_code is None else error_code
             yield ToolEvent(
                 type="tool.failed",
-                error=CapabilityError(code="tool_unavailable", user_message="工具当前不可用，已转为普通对话方式"),
+                tool_name=batch,
+                error=CapabilityError(code=key, user_message="工具当前不可用，已转为普通对话方式"),
             )
             return
         yield ToolEvent(
             type="tool.completed",
             tool_name=batch,
-            result=ToolExecutionResult(tool_name=batch or "tool_task", user_message=final),
+            result=ToolExecutionResult(
+                tool_name=batch or "tool_task",
+                user_message=final,
+                duration_ms=duration_ms,
+            ),
         )
 
     async def cancel(self, request_id: str) -> None:
-        """取消占位通道（R5 引入真实取消传播）。"""
+        """取消占位通道（R5b 引入真实取消传播）。"""
         return None
 
     def _with_time_context(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:

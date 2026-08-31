@@ -168,32 +168,109 @@ createApp({
       this.streaming = true;
       this.chatVisible = true;
       const assistant = this.addRecord('assistant', '', true);
+      assistant.typing = true;
+      // 气泡 DOM 在 Vue nextTick 后才渲染：el 改为惰性查找（请求返回后 / drain 期间补查），
+      // 不能同步假设 addRecord 之后就能取到（首次对话时 $refs 尚未含新气泡 → el=null → 正文无处可写）
+      let el = null;
+      const ensureEl = () => { if (!el) el = this.bubbleTextEl(assistant.id) || null; };
+      ensureEl();
+      if (el) el.textContent = '';
+
+      // 增量打字机（R5 体验修复）：
+      // - 正文增量（message.delta）入队，逐字直写真实 DOM → 打字机效果（不依赖块大小，
+      //   工具路径的整段最终文本同样逐字打出，杜绝"一次性整块出现"）；
+      // - 工具调用/思考过程类事件（tool.*、emotion_mark 帧）不进入正文 → 只输出最终回复正文。
+      let typeBuffer = []; // Unicode 码点队列（for...of 按码点迭代，emoji 不会拆成半代理对）
+      let contentAcc = ''; // 完整正文累积（DOM 直写之外的兜底内容，finalize 用）
+      let drainRunning = false;
+      let drainedResolve = null;
+      let drainedPromise = Promise.resolve();
+      const pushText = (t) => {
+        if (!t) return;
+        contentAcc += t;
+        for (const ch of t) typeBuffer.push(ch);
+        if (!drainRunning) void drain();
+      };
+      const drain = async () => {
+        drainedPromise = new Promise((r) => { drainedResolve = r; });
+        drainRunning = true;
+        while (typeBuffer.length > 0) {
+          ensureEl(); // DOM 可能刚渲染：每字前补查一次（找到后不再重复查）
+          const ch = typeBuffer.shift();
+          if (el) el.textContent += ch; // DOM 直写：浏览器下一帧绘制，逐字呈现
+          // 停顿节奏：换行稍慢、标点尾音略顿（与主动发言 typeText 一致）
+          let delay = TYPE_SPEED;
+          if (ch === '\n') delay = 140;
+          else if ('。，！？～~♪'.includes(ch)) delay = 70;
+          await this._raf(delay);
+        }
+        drainRunning = false;
+        if (typeBuffer.length > 0) { void drain(); return; } // 竞态兜底：drain 期间又被 push
+        if (drainedResolve) { drainedResolve(); drainedResolve = null; }
+      };
 
       try {
         const response = await request(API_BASE + '/chat/stream', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ input: text, session_id: 'default' }),
+          // R4：请求 SSE（UIEvent v1），后端按 Accept 协商
+          headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+          body: JSON.stringify({ input: text, session_id: SESSION_ID }),
         });
+        ensureEl(); // 请求已返回，气泡 DOM 此刻必已渲染（此前 el 可能为 null）
+        if (el) el.textContent = '';
         const reader = response.body.getReader();
         const decoder = new TextDecoder('utf-8');
-        let buffer = '';
-        // 后端一次性返回，这里累积完整响应
+        // R4：SSE frame 解析（event/data），按事件类型更新 UI（SPEC-050 §5/§6/§14）
+        let frame = '';
+        const handleEvent = (type, data) => {
+          let ev = null;
+          try { ev = JSON.parse(data); } catch (e) { return; }
+          const payload = (ev && ev.payload) || {};
+          if (type === 'message.delta') {
+            // 情绪标记帧（emotion_mark）不进正文；正文增量入打字机队列
+            if (!payload.emotion_mark && payload.text) pushText(payload.text);
+          } else if (type === 'message.completed') {
+            if (payload.emotion) this.emotion = payload.emotion; // 终态兜底切情绪（无副作用）
+          } else if (type === 'emotion.changed') {
+            if (payload.emotion) {
+              this.emotion = payload.emotion;
+              this.streaming = false; // 结束"思考中"态，立绘切到对应情绪
+            }
+          } else if (type === 'tool.selected' || type === 'tool.started' ||
+                     type === 'tool.completed' || type === 'tool.failed' ||
+                     type === 'tool.confirmation_required') {
+            // R5 体验修复：工具调用过程/思考过程隐藏（不写入回复正文）。
+            // 后续如需展示工具状态，改从独立状态区渲染（不混入正文气泡）。
+          } else if (type === 'request.failed') {
+            if (payload.user_message) pushText(payload.user_message);
+          }
+        };
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          buffer += decoder.decode(value, { stream: true });
+          frame += decoder.decode(value, { stream: true });
+          let sep;
+          while ((sep = frame.indexOf('\n\n')) >= 0) {
+            const block = frame.slice(0, sep);
+            frame = frame.slice(sep + 2);
+            let evType = null;
+            const dataLines = [];
+            for (const line of block.split('\n')) {
+              if (line.startsWith('event:')) evType = line.slice(6).trim();
+              else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+            }
+            if (evType && dataLines.length) handleEvent(evType, dataLines.join('\n'));
+          }
         }
-        const parsed = this.parseEmotionMark(buffer);
-        this.emotion = parsed.emotion;
-        // 收到完整响应：结束"思考中"态，立绘立即切到对应情绪
-        // （currentPortrait 在 streaming=true 时固定显示 thinking.png，
-        //   必须在此先置 false，立绘才能在打字机开始前切换到位）
+        // 流结束后等待打字机把队列打完（drainedPromise 已 resolve 则立即通过）
+        await drainedPromise;
+        ensureEl();
+        assistant.typing = false;
+        assistant.content = (el && el.textContent) || contentAcc || frame;
+        assistant.display = assistant.content;
         this.streaming = false;
-        // 方案二：后端伪流式，前端对完整文本做流式打印（逐字显示）
-        await Vue.nextTick(); // 确保气泡 DOM + ref 已绑定、立绘已切换
-        await this.typeText(assistant, parsed.body);
       } catch (e) {
+        assistant.typing = false;
         assistant.content = '（连接失败：' + e.message + '）';
         assistant.display = assistant.content;
       } finally {
@@ -332,7 +409,10 @@ createApp({
         const response = await request(API_BASE + '/initiative');
         const items = await response.json();
         for (const item of items) {
-          const parsed = this.parseEmotionMark(item);
+          const payload = (item && item.payload) || {};
+          const text = payload.text || '';
+          if (!text) continue;
+          const parsed = this.parseEmotionMark(text);
           this.emotion = parsed.emotion;
           const msg = this.addRecord('assistant', parsed.body, true);
           this.chatVisible = true;

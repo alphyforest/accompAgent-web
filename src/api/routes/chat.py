@@ -2,7 +2,7 @@
 
 from typing import AsyncGenerator
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
 from src.api.dependencies import (
@@ -13,6 +13,7 @@ from src.api.dependencies import (
     get_orchestrator,
 )
 from src.api.schemas import ChatRequest, MoodResponse
+from src.api.sse import encode_sse, legacy_chunks, wants_sse
 from src.application.orchestrator import ConversationOrchestrator
 from src.application.query_service import DialogueQueryService
 
@@ -22,22 +23,32 @@ router = APIRouter()
 @router.post("/chat/stream")
 async def chat_stream(
     request: ChatRequest,
+    raw: Request,
     orchestrator: ConversationOrchestrator = Depends(get_orchestrator),
 ) -> StreamingResponse:
-    """对话接口（R2：经 ConversationOrchestrator；v1 保持 text/plain 兼容输出，R3/R4 迁移真流式/UIEvent）。"""
+    """对话接口（R4：UIEvent v1 + SSE；兼容旧文本通道）。
+
+    - Accept: text/event-stream → SSE（SPEC-050 §2，前端主用）
+    - 其他 Accept → LegacyDialogueAdapter 文本通道（SPEC-050 §11，迁移兼容）
+    """
 
     async def generate() -> AsyncGenerator[str, None]:
-        context = default_request_context(request.session_id)
-        # R2 修复：能力快照依赖工具注册，必须先触发工具来源同步（懒连接；幂等 + 失败降级）
+        # 工具来源懒连接必须先于能力快照（R2 接缝守护，test_tool_sync_entry.py）
         await ensure_tools_synced()
+        context = default_request_context(request.session_id)
         capabilities = get_capability_snapshot()
-        async for event in orchestrator.handle(context, request.input, capabilities):
-            if event.type == "message.delta" and event.payload.get("content"):
-                yield str(event.payload["content"])
+        events = orchestrator.handle(context, request.input, capabilities)
+        if wants_sse(raw.headers.get("accept", "")):
+            async for event in events:
+                yield encode_sse(event)
+        else:
+            async for chunk in legacy_chunks(events):
+                yield chunk
 
+    use_sse = wants_sse(raw.headers.get("accept", ""))
     return StreamingResponse(
         generate(),
-        media_type="text/plain; charset=utf-8",
+        media_type="text/event-stream; charset=utf-8" if use_sse else "text/plain; charset=utf-8",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
