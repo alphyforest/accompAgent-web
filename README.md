@@ -26,25 +26,28 @@ ai_agent/
 │   │   ├── routes/         # chat / events / control 路由
 │   │   ├── app.py          # 应用入口与静态资源挂载
 │   │   └── dependencies.py # 单例依赖注入
+│   ├── application/        # 应用层：契约（UIEvent v1）/ 路由 / 编排 / 查询与控制服务
+│   ├── bootstrap/          # Composition Root 适配层（服务 Port 装配目标）
 │   ├── config/
 │   │   ├── settings.py     # 配置（pydantic-settings，支持 .env）
 │   │   └── roles/          # 角色配置：system_prompt.txt / events.json / phrases/
 │   ├── core/
-│   │   ├── agent/          # 对话引擎、ToolLoop、事件系统、气氛值
+│   │   ├── agent/          # 对话引擎、主动调度器、事件系统、气氛值
 │   │   ├── llm/            # DeepSeek 客户端与 prompt 构建
-│   │   ├── memory/         # 短期记忆
+│   │   ├── memory/         # 短期记忆与长期记忆（SQLite）
 │   │   ├── character/      # 人设加载、语料
-│   │   └── tools/          # 工具引擎：契约/注册表/运行时/时间注入/备份/MCP 适配器
-│   ├── mcp_gateway/        # MCP Server（预留脚手架，未被业务调用）
+│   │   └── tools/          # 工具引擎：契约/注册表/目录/策略/ToolLoop/时间注入/备份/MCP 适配器
+│   ├── mcp_gateway/        # LEGACY（R6 标记，真实 MCP 能力由 core/tools/sources 承担，待删除）
 │   └── utils/
 ├── scripts/                # 工具脚本（agenda_mcp_smoke.py 真实 server 联调）
 ├── static/                 # 前端（Vue3 + 原生 JS/CSS，免构建）
 │   ├── index.html
 │   ├── app.js / app.css
+│   ├── vendor/             # 本地化 Vue（R6 起不再依赖公网 CDN）
 │   └── assets/             # 立绘、背景、BGM
-├── phrases/                # 语料
-├── tests/                  # pytest 单元测试
-├── run.py                  # 统一入口（start / stop / mcp）
+├── phrases/                # 语料（旧"小暖"残留）
+├── tests/                  # pytest 单元测试（200 项）
+├── run.py                  # 统一入口（start / stop；mcp 已 DEPRECATED）
 ├── requirements.txt
 └── pyproject.toml
 ```
@@ -71,7 +74,7 @@ DEEPSEEK_API_KEY=你的_api_key
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 # 推理深度：none（关闭思考，推荐）/ low / medium / high
-REASONING_EFFORT=none
+REASONING_EFFORT=low
 ```
 
 ### 3. 启动服务
@@ -110,6 +113,8 @@ python run.py stop
 
 ### 工具引擎（第三阶段）
 
+> **启用前提（R6 起）**：Agenda 工具默认未配置不可用。需在 `.env` 配置 `AGENDA_MCP_COMMAND`（node）与 `AGENDA_MCP_ARGS`（tsx CLI 入口 + server.ts，JSON 数组），可选 `AGENDA_DATA_PATH`（与桌面端共享数据文件）；配置后**重启服务**生效。未配置时对话行为与未接入一致（自动降级）。
+
 - **对话即日程管理**：当 Agenda MCP Server 可用时，Agent 可调用日程/课表工具（查、建、改、完成、删、课表、学期配置）。工具描述自带 ISO 8601 时间写法与「先查重」语义，模型会先获知当前时间再换算用户口语时间（「明天」「周五 3 点」）。
 - **降级保障**：工具服务不可用时自动禁用相应工具，对话行为与未接入前一致；任何工具异常不会中断回复。
 - **联调脚本**：`python scripts/agenda_mcp_smoke.py` 使用临时数据目录对真实 Server 做 7 工具 + 读 3 + 写闭环验证。
@@ -126,7 +131,7 @@ python run.py stop
 |------|------|------|
 | `POST` | `/api/chat/stream` | 对话：`Accept: text/event-stream` → UIEvent v1 SSE；其他 → legacy 文本 |
 | `GET`  | `/api/mood` | 查询当前气氛值 |
-| `GET`  | `/api/status` | 查询服务状态（气氛值/活跃链/冷却） |
+| `GET`  | `/api/status` | 查询服务状态（气氛值/情绪标签） |
 | `GET`  | `/api/character` | 下发角色卡（立绘映射/默认情绪） |
 | `GET`  | `/api/initiative` | 取出积压的主动发言（轮询，响应为 UIEvent 数组） |
 | `POST` | `/api/reset` | 三档清除并复位：`{"level": "session"\|"history"\|"all"}`（缺省 session） |
@@ -138,7 +143,7 @@ python run.py stop
 
 ### 长期记忆说明（第二阶段）
 
-- **机制**：对话累积到会话 buffer，空闲超时（默认 1h）或条数达阈值（默认 30 条）时，由 LLM 以 JSON 结构化抽取「会话摘要 + 用户画像事实」，落 SQLite（`user_memory` / `session_summaries` 表）。抽取失败自动降级，不阻塞对话。
+- **机制**：对话累积到会话 buffer，空闲超时（默认 15 分钟）或条数达阈值（默认 30 条）时，由 LLM 以 JSON 结构化抽取「会话摘要 + 用户画像事实」，落 SQLite（`user_memory` / `session_summaries` 表）。抽取失败自动降级，不阻塞对话。
 - **注入**：每次对话将按 `importance` 取 top-k（默认 ≤8 条）记忆拼入 system prompt；`confirmed=0` 的条目会标注「推测」，不会当作事实向用户确认。
 - **管理**：控制台「🧠 AI 记忆」页签可查看/确认/纠正/删除记忆；「📜 聊天记录」页签含历史会话摘要列表。
 - **清除三档**：重置当前对话（session）/ 清除聊天记录（history，保留身份记忆）/ 忘记我（all，彻底清除）。
@@ -161,16 +166,16 @@ pytest
 | `REASONING_EFFORT` | `low` | 推理深度（`none` 关闭思考可显著降低首字延迟） |
 | `HOST` / `PORT` | `127.0.0.1` / `5000` | 服务监听地址（R6：分发默认本地绑定） |
 | `MAX_HISTORY` | `10` | 短期记忆滑动窗口大小 |
-| `MEMORY_DB_PATH` | `./data/memory.db` | 长期记忆 SQLite 路径 |
-| `MEMORY_IDLE_TIMEOUT_MINUTES` | `60` | 惰性总结空闲超时（分钟） |
+| `MEMORY_DB_PATH` | `memory.db` | 长期记忆 SQLite 文件名/路径；相对路径落入用户数据目录（Windows: `%LOCALAPPDATA%\ai-agent\data`，可用 `AI_AGENT_HOME` 覆盖） |
+| `MEMORY_IDLE_TIMEOUT_MINUTES` | `15` | 惰性总结空闲超时（分钟） |
 | `MEMORY_SEGMENT_MAX_MESSAGES` | `30` | 惰性总结条数阈值 |
 | `MEMORY_INJECT_TOP_K` | `8` | 记忆注入条数上限 |
 | `MEMORY_FORGET_DAYS` / `MEMORY_FORGET_DECAY` | `30` / `2` | 遗忘策略参数 |
 | `AGENDA_MCP_ENABLED` | `true` | MCP 工具引擎总开关 |
-| `AGENDA_MCP_COMMAND` / `AGENDA_MCP_ARGS` | `node` / tsx+server.ts | Agenda MCP Server 启动方式（勿直接 spawn .cmd） |
+| `AGENDA_MCP_COMMAND` / `AGENDA_MCP_ARGS` | 空（必配才启用） | Agenda MCP Server 启动方式：`node` + tsx CLI 入口 + server.ts（勿直接 spawn .cmd；R6 起必须显式配置） |
 | `AGENDA_DATA_PATH` | 空（可选） | 共享数据文件（与 agenda 桌面端同一文件）；未配置时 Agenda 不可用但不影响启动 |
 | `AGENDA_TOOL_ROUNDS` / `AGENDA_TOOL_TIMEOUT` / `AGENDA_TOOL_OVERALL_TIMEOUT` | `4` / `30` / `120` | ToolLoop 轮数与超时（秒） |
-| `AGENDA_DATA_BACKUP_DIR` | `./data/agenda_backup` | agenda-data.json 每日备份目录 |
+| `AGENDA_DATA_BACKUP_DIR` | 空 | agenda-data.json 每日备份目录；留空使用用户备份目录（`%LOCALAPPDATA%\ai-agent\backup`） |
 
 ## 许可
 
